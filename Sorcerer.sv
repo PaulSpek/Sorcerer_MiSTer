@@ -436,9 +436,9 @@ assign VGA_DE = ~(HBlank | VBlank);
 assign VGA_HS = HSync;
 assign VGA_VS = VSync;
 
-assign VGA_R = video ? 6'h3F : 6'h00;
-assign VGA_G = video ? 6'h3F : 6'h00;
-assign VGA_B = video ? 6'h3F : 6'h00;
+assign VGA_R = video ? 8'hFF : 8'h00;
+assign VGA_G = video ? 8'hFF : 8'h00;
+assign VGA_B = video ? 8'hFF : 8'h00;
 
 /*
 arcade_video #(256,24) arcade_video
