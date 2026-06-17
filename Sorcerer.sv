@@ -212,6 +212,7 @@ localparam CONF_STR = {
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[2],TV Mode,NTSC,PAL;",
 	"O[4:3],Noise,White,Red,Green,Blue;",
+	"O[5],WAV polarity,Normal,Inverted;",
 	"-;",
 	"F1,BIN,Load BIN;",
 	"F2,WAV,Load WAV;",
@@ -355,6 +356,7 @@ wav_cass_loader wav_cass_loader
 	.DL(ioctl_download & (ioctl_index == IOCTL_WAV)),
 	.DL_WE(ioctl_wr),
 	.DL_DATA(ioctl_dout[7:0]),
+	.INVERT(status[5]),
 	.WAIT(ioctl_wait),
 	.CASS_OUT(wav_cass_in),
 	.ACTIVE(wav_active)
@@ -484,6 +486,7 @@ module wav_cass_loader
 	input        DL,
 	input        DL_WE,
 	input  [7:0] DL_DATA,
+	input        INVERT,
 	output       WAIT,
 	output reg   CASS_OUT,
 	output       ACTIVE
@@ -525,7 +528,7 @@ wire accept = DL_WE & ~(in_data_sample_start & ~sample_ready);
 wire [31:0] sample_rate_safe = sample_rate ? sample_rate : 32'd44100;
 
 assign WAIT = DL & in_data_sample_start & ~sample_ready;
-assign ACTIVE = DL & (state == ST_DATA) & ~invalid;
+assign ACTIVE = DL & ~invalid;
 
 always @(posedge CLK) begin
 	dl_d <= DL;
@@ -662,9 +665,9 @@ always @(posedge CLK) begin
 					if (frame_pos == 0) sample_ready <= 0;
 
 					if (bits_per_sample == 8) begin
-						if (frame_pos == 0) CASS_OUT <= DL_DATA[7];
+						if (frame_pos == 0) CASS_OUT <= DL_DATA[7] ^ INVERT;
 					end else begin
-						if (frame_pos == 1) CASS_OUT <= ~DL_DATA[7];
+						if (frame_pos == 1) CASS_OUT <= DL_DATA[7] ^ INVERT;
 					end
 
 					if (frame_pos == frame_bytes - 1'd1)
