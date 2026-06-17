@@ -175,7 +175,6 @@ module emu
 
 ///////// Default values for ports not used in this core /////////
 
-assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
 assign {UART_RTS, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
@@ -194,6 +193,7 @@ assign AUDIO_L = 0;
 assign AUDIO_R = 0;
 assign AUDIO_MIX = 0;
 
+assign LED_USER = tape_adc_act;
 assign LED_DISK = 0;
 assign LED_POWER = 0;
 assign BUTTONS = 0;
@@ -328,13 +328,20 @@ always @(posedge clk12) begin
 end
 
 wire        uart_en = 1'b0;
+wire        adc_cassette_bit;
+wire        tape_adc_act;
+
+ltc2308_tape ltc2308_tape
+(
+	.reset(reset),
+	.clk(CLK_50M),
+	.ADC_BUS(ADC_BUS),
+	.dout(adc_cassette_bit),
+	.active(tape_adc_act)
+);
 
 always @(posedge clk12) begin
-`ifdef USE_AUDIO_IN
-	cass_in[0] <= AUDIO_IN;
-`else
-	cass_in[0] <= UART_RXD;
-`endif
+	cass_in[0] <= tape_adc_act ? adc_cassette_bit : UART_RXD;
 	cass_in[1] <= cass_in[0];
 end
 
