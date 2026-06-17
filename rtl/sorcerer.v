@@ -58,6 +58,7 @@ module sorcerer (
 	input   [7:0] DL_DATA,
 	input         DL_WE,
 	input         DL_ROM,
+	input         DL_QUICK,
 	input         DL_PAC,
 	input         DL_TAPE,
 	input         UNL_PAC,
@@ -269,16 +270,122 @@ assign      cpu_din = romcs ? rom_dout :
                       ioen ? io_in : 8'hff;
 
 wire        tape_dl = DL_TAPE & DL;
+wire        quick_dl = DL_QUICK & DL;
 reg   [7:0] tape_wr;
 always @(posedge DL_CLK) begin
 	if (DL_WE) tape_wr <= 8'hFF;
 	else tape_wr <= {1'b0, tape_wr[7:1]};
 end
 
-assign      RAM_ADDR = tape_dl ? {1'b1, DL_ADDR[15:0]} : rfsh_n ? {2'b00, cpu_addr[14:0]} : {1'b1, tape_emu_addr};
-assign      RAM_RD = tape_dl ? 1'b0 : !rfsh_n | (ramen & ~rd_n);
-assign      RAM_WR = tape_dl ? |tape_wr : ramen & ~wr_n;
-assign      RAM_DIN = tape_dl ? DL_DATA : cpu_dout;
+reg   [7:0] quick_wr;
+reg  [15:0] quick_addr;
+reg   [7:0] quick_data;
+reg  [15:0] quick_exec;
+reg         quick_ready;
+reg         quick_error;
+
+always @(posedge DL_CLK) begin : quickload
+	localparam [2:0]
+		Q_HEADER  = 3'd0,
+		Q_NAME    = 3'd1,
+		Q_EXEC_LO = 3'd2,
+		Q_EXEC_HI = 3'd3,
+		Q_LOAD_LO = 3'd4,
+		Q_LOAD_HI = 3'd5,
+		Q_END_LO  = 3'd6,
+		Q_PAYLOAD = 3'd7;
+
+	reg        quick_dl_d;
+	reg  [2:0] state;
+	reg  [2:0] header_cnt;
+	reg [15:0] load_addr;
+	reg [15:0] end_addr;
+	reg [15:0] payload_left;
+	reg [15:0] payload_addr;
+
+	quick_dl_d <= quick_dl;
+	quick_wr <= {1'b0, quick_wr[7:1]};
+
+	if (RESET | (quick_dl & ~quick_dl_d)) begin
+		state <= Q_HEADER;
+		header_cnt <= 0;
+		load_addr <= 0;
+		end_addr <= 0;
+		payload_left <= 0;
+		payload_addr <= 0;
+		quick_addr <= 0;
+		quick_data <= 0;
+		quick_exec <= 0;
+		quick_ready <= 0;
+		quick_error <= 0;
+		quick_wr <= 0;
+	end else if (quick_dl & DL_WE & ~quick_error) begin
+		case (state)
+			Q_HEADER: begin
+				if (header_cnt == 6)
+					state <= Q_NAME;
+				else
+					header_cnt <= header_cnt + 1'd1;
+			end
+
+			Q_NAME: begin
+				if (DL_DATA == 8'h1A)
+					state <= Q_EXEC_LO;
+			end
+
+			Q_EXEC_LO: begin
+				quick_exec[7:0] <= DL_DATA;
+				state <= Q_EXEC_HI;
+			end
+
+			Q_EXEC_HI: begin
+				quick_exec[15:8] <= DL_DATA;
+				state <= Q_LOAD_LO;
+			end
+
+			Q_LOAD_LO: begin
+				load_addr[7:0] <= DL_DATA;
+				state <= Q_LOAD_HI;
+			end
+
+			Q_LOAD_HI: begin
+				load_addr[15:8] <= DL_DATA;
+				state <= Q_END_LO;
+			end
+
+			Q_END_LO: begin
+				end_addr[7:0] <= DL_DATA;
+				state <= Q_PAYLOAD;
+			end
+
+			Q_PAYLOAD: begin
+				if (payload_left == 0) begin
+					end_addr[15:8] <= DL_DATA;
+					if ({DL_DATA, end_addr[7:0]} < load_addr || load_addr[15] || DL_DATA[7]) begin
+						quick_error <= 1;
+					end else begin
+						payload_addr <= load_addr;
+						payload_left <= {DL_DATA, end_addr[7:0]} - load_addr + 1'd1;
+					end
+				end else begin
+					quick_addr <= payload_addr;
+					quick_data <= DL_DATA;
+					quick_wr <= 8'hFF;
+					payload_addr <= payload_addr + 1'd1;
+					payload_left <= payload_left - 1'd1;
+					quick_ready <= 1;
+				end
+			end
+
+			default: ;
+		endcase
+	end
+end
+
+assign      RAM_ADDR = quick_dl ? {1'b0, quick_addr} : tape_dl ? {1'b1, DL_ADDR[15:0]} : rfsh_n ? {2'b00, cpu_addr[14:0]} : {1'b1, tape_emu_addr};
+assign      RAM_RD = (quick_dl | tape_dl) ? 1'b0 : !rfsh_n | (ramen & ~rd_n);
+assign      RAM_WR = quick_dl ? |quick_wr : tape_dl ? |tape_wr : ramen & ~wr_n;
+assign      RAM_DIN = quick_dl ? quick_data : tape_dl ? DL_DATA : cpu_dout;
 
 reg   [3:0] kbd_out;
 reg         rs232_sel;
@@ -525,6 +632,6 @@ always @(posedge DL_CLK) begin : tape_emu
 	end
 end
 
-assign LED = DL | tape_emu_ready;
+assign LED = DL | tape_emu_ready | quick_ready;
 
 endmodule
