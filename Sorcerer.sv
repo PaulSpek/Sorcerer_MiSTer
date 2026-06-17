@@ -213,7 +213,8 @@ localparam CONF_STR = {
 	"O[2],TV Mode,NTSC,PAL;",
 	"O[4:3],Noise,White,Red,Green,Blue;",
 	"-;",
-	"F1,BIN;",
+	"F1,BIN,Load BIN;",
+	"F2,WAV,Load WAV;",
 	"-;",
 	"P2,Test Page 2;",
 	"P2-;",
@@ -237,6 +238,12 @@ wire [15:0] ioctl_addr;
 wire ioctl_wr;
 wire [1:0] ioctl_index;
 wire [15:0] ioctl_dout;
+wire ioctl_wait;
+
+localparam [1:0] IOCTL_ROM  = 2'd0;
+localparam [1:0] IOCTL_WAV  = 2'd1;
+localparam [1:0] IOCTL_PAC  = 2'd2;
+localparam [1:0] IOCTL_TAPE = 2'd3;
 
 wire [21:0] gamma_bus;
 wire forced_scandoubler;
@@ -263,7 +270,8 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
     .ioctl_addr(ioctl_addr),
     .ioctl_dout(ioctl_dout),
     .ioctl_wr(ioctl_wr),
-    .ioctl_index(ioctl_index)
+    .ioctl_index(ioctl_index),
+    .ioctl_wait(ioctl_wait)
 );
 
 ///////////////////////   CLOCKS   ///////////////////////////////
@@ -328,15 +336,29 @@ always @(posedge clk12) begin
 end
 
 wire        uart_en = 1'b0;
+wire        wav_cass_in;
+wire        wav_active;
 
 always @(posedge clk12) begin
 `ifdef USE_AUDIO_IN
 	cass_in[0] <= AUDIO_IN;
 `else
-	cass_in[0] <= UART_RXD;
+	cass_in[0] <= wav_active ? wav_cass_in : UART_RXD;
 `endif
 	cass_in[1] <= cass_in[0];
 end
+
+wav_cass_loader wav_cass_loader
+(
+	.CLK(clk_sys),
+	.RESET(reset),
+	.DL(ioctl_download & (ioctl_index == IOCTL_WAV)),
+	.DL_WE(ioctl_wr),
+	.DL_DATA(ioctl_dout[7:0]),
+	.WAIT(ioctl_wait),
+	.CASS_OUT(wav_cass_in),
+	.ACTIVE(wav_active)
+);
 
 `ifdef USE_EXPANSION
 assign MOTOR_CTRL = cass_motor ? 1'b0 : 1'bZ;
@@ -400,9 +422,9 @@ sorcerer sorcerer (
 	.DL_ADDR(ioctl_addr[15:0]),
 	.DL_DATA(ioctl_dout),
 	.DL_WE(ioctl_wr),
-	.DL_ROM(ioctl_index == 0),
-	.DL_PAC(ioctl_index == 1),
-	.DL_TAPE(ioctl_index == 2),
+	.DL_ROM(ioctl_index == IOCTL_ROM),
+	.DL_PAC(ioctl_index == IOCTL_PAC),
+	.DL_TAPE(ioctl_index == IOCTL_TAPE),
 
 	.UNL_PAC(status[1]),
 	.LED(ledb)
@@ -453,4 +475,214 @@ arcade_video #(256,24) arcade_video
 	.fx(0)
 );
 */
+endmodule
+
+module wav_cass_loader
+(
+	input        CLK,
+	input        RESET,
+	input        DL,
+	input        DL_WE,
+	input  [7:0] DL_DATA,
+	output       WAIT,
+	output reg   CASS_OUT,
+	output       ACTIVE
+);
+
+localparam CLK_FREQ = 32'd48000000;
+
+localparam [2:0]
+	ST_HEADER     = 3'd0,
+	ST_CHUNK_ID   = 3'd1,
+	ST_CHUNK_SIZE = 3'd2,
+	ST_FMT        = 3'd3,
+	ST_SKIP       = 3'd4,
+	ST_DATA       = 3'd5,
+	ST_DONE       = 3'd6;
+
+reg        dl_d;
+reg  [2:0] state;
+reg  [3:0] header_pos;
+reg  [1:0] chunk_pos;
+reg [31:0] chunk_id;
+reg [31:0] chunk_size;
+reg [31:0] chunk_left;
+reg  [4:0] fmt_pos;
+reg [15:0] audio_format;
+reg [15:0] channels;
+reg [31:0] sample_rate;
+reg [15:0] bits_per_sample;
+reg  [2:0] frame_pos;
+reg  [2:0] frame_bytes;
+reg [31:0] sample_acc;
+reg        sample_ready;
+reg        invalid;
+
+wire starting = DL & ~dl_d;
+wire stopping = ~DL & dl_d;
+wire in_data_sample_start = state == ST_DATA && frame_pos == 0;
+wire accept = DL_WE & ~(in_data_sample_start & ~sample_ready);
+wire [31:0] sample_rate_safe = sample_rate ? sample_rate : 32'd44100;
+
+assign WAIT = DL & in_data_sample_start & ~sample_ready;
+assign ACTIVE = DL & (state == ST_DATA) & ~invalid;
+
+always @(posedge CLK) begin
+	dl_d <= DL;
+
+	if (RESET | starting) begin
+		state <= ST_HEADER;
+		header_pos <= 0;
+		chunk_pos <= 0;
+		chunk_id <= 0;
+		chunk_size <= 0;
+		chunk_left <= 0;
+		fmt_pos <= 0;
+		audio_format <= 1;
+		channels <= 1;
+		sample_rate <= 44100;
+		bits_per_sample <= 8;
+		frame_pos <= 0;
+		frame_bytes <= 1;
+		sample_acc <= 0;
+		sample_ready <= 1;
+		invalid <= 0;
+		CASS_OUT <= 0;
+	end else if (stopping) begin
+		state <= ST_DONE;
+		sample_ready <= 0;
+	end else if (DL) begin
+		if (state == ST_DATA && ~sample_ready) begin
+			if (sample_acc >= (CLK_FREQ - sample_rate_safe)) begin
+				sample_acc <= sample_acc + sample_rate_safe - CLK_FREQ;
+				sample_ready <= 1;
+			end else begin
+				sample_acc <= sample_acc + sample_rate_safe;
+			end
+		end
+
+		if (accept) begin
+			case (state)
+				ST_HEADER: begin
+					case (header_pos)
+						0: if (DL_DATA != "R") invalid <= 1;
+						1: if (DL_DATA != "I") invalid <= 1;
+						2: if (DL_DATA != "F") invalid <= 1;
+						3: if (DL_DATA != "F") invalid <= 1;
+						8: if (DL_DATA != "W") invalid <= 1;
+						9: if (DL_DATA != "A") invalid <= 1;
+						10: if (DL_DATA != "V") invalid <= 1;
+						11: if (DL_DATA != "E") invalid <= 1;
+						default: ;
+					endcase
+
+					if (header_pos == 11) begin
+						state <= ST_CHUNK_ID;
+						header_pos <= 0;
+						chunk_pos <= 0;
+						chunk_id <= 0;
+					end else begin
+						header_pos <= header_pos + 1'd1;
+					end
+				end
+
+				ST_CHUNK_ID: begin
+					chunk_id <= {chunk_id[23:0], DL_DATA};
+					if (chunk_pos == 3) begin
+						state <= ST_CHUNK_SIZE;
+						chunk_pos <= 0;
+						chunk_size <= 0;
+					end else begin
+						chunk_pos <= chunk_pos + 1'd1;
+					end
+				end
+
+				ST_CHUNK_SIZE: begin
+					chunk_size <= chunk_size | ({24'd0, DL_DATA} << {chunk_pos, 3'b000});
+					if (chunk_pos == 3) begin
+						chunk_left <= chunk_size | ({24'd0, DL_DATA} << 24);
+						chunk_pos <= 0;
+
+						if (chunk_id == "fmt ") begin
+							state <= ST_FMT;
+							fmt_pos <= 0;
+						end else if (chunk_id == "data") begin
+							state <= ST_DATA;
+							frame_pos <= 0;
+							sample_acc <= 0;
+							sample_ready <= 1;
+							frame_bytes <= (bits_per_sample == 16) ? (channels > 1 ? 3'd4 : 3'd2) :
+							               (channels > 1 ? 3'd2 : 3'd1);
+							if (audio_format != 1) invalid <= 1;
+							if (bits_per_sample != 8 && bits_per_sample != 16) invalid <= 1;
+						end else begin
+							state <= ST_SKIP;
+						end
+					end else begin
+						chunk_pos <= chunk_pos + 1'd1;
+					end
+				end
+
+				ST_FMT: begin
+					case (fmt_pos)
+						0: audio_format[7:0] <= DL_DATA;
+						1: audio_format[15:8] <= DL_DATA;
+						2: channels[7:0] <= DL_DATA;
+						3: channels[15:8] <= DL_DATA;
+						4: sample_rate[7:0] <= DL_DATA;
+						5: sample_rate[15:8] <= DL_DATA;
+						6: sample_rate[23:16] <= DL_DATA;
+						7: sample_rate[31:24] <= DL_DATA;
+						14: bits_per_sample[7:0] <= DL_DATA;
+						15: bits_per_sample[15:8] <= DL_DATA;
+						default: ;
+					endcase
+
+					fmt_pos <= fmt_pos + 1'd1;
+					if (chunk_left == 1) begin
+						state <= ST_CHUNK_ID;
+						chunk_pos <= 0;
+						chunk_id <= 0;
+						chunk_size <= 0;
+					end
+					chunk_left <= chunk_left - 1'd1;
+				end
+
+				ST_SKIP: begin
+					if (chunk_left == 1) begin
+						state <= ST_CHUNK_ID;
+						chunk_pos <= 0;
+						chunk_id <= 0;
+						chunk_size <= 0;
+					end
+					chunk_left <= chunk_left - 1'd1;
+				end
+
+				ST_DATA: begin
+					if (frame_pos == 0) sample_ready <= 0;
+
+					if (bits_per_sample == 8) begin
+						if (frame_pos == 0) CASS_OUT <= DL_DATA[7];
+					end else begin
+						if (frame_pos == 1) CASS_OUT <= ~DL_DATA[7];
+					end
+
+					if (frame_pos == frame_bytes - 1'd1)
+						frame_pos <= 0;
+					else
+						frame_pos <= frame_pos + 1'd1;
+
+					if (chunk_left == 1) begin
+						state <= ST_DONE;
+						sample_ready <= 0;
+					end
+					chunk_left <= chunk_left - 1'd1;
+				end
+
+				default: ;
+			endcase
+		end
+	end
+end
+
 endmodule
