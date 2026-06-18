@@ -536,11 +536,12 @@ reg        have_edge;
 
 wire starting = DL & ~dl_d;
 wire stopping = ~DL & dl_d;
-wire in_data_sample_start = state == ST_DATA && frame_pos == 0;
-wire accept = DL_WE & ~(in_data_sample_start & ~sample_ready);
+wire in_data_byte = state == ST_DATA;
+wire accept = DL_WE & ~(in_data_byte & ~sample_ready);
 wire [31:0] sample_rate_safe = sample_rate ? sample_rate : 32'd44100;
+wire [31:0] byte_rate_safe = sample_rate_safe * frame_bytes;
 
-assign WAIT = DL & in_data_sample_start & ~sample_ready;
+assign WAIT = DL & in_data_byte & ~sample_ready;
 assign ACTIVE = DL & ~invalid;
 
 always @(posedge CLK) begin
@@ -574,11 +575,11 @@ always @(posedge CLK) begin
 		sample_ready <= 0;
 	end else if (DL) begin
 		if (state == ST_DATA && ~sample_ready) begin
-			if (sample_acc >= (CLK_FREQ - sample_rate_safe)) begin
-				sample_acc <= sample_acc + sample_rate_safe - CLK_FREQ;
+			if (sample_acc >= (CLK_FREQ - byte_rate_safe)) begin
+				sample_acc <= sample_acc + byte_rate_safe - CLK_FREQ;
 				sample_ready <= 1;
 			end else begin
-				sample_acc <= sample_acc + sample_rate_safe;
+				sample_acc <= sample_acc + byte_rate_safe;
 			end
 		end
 
@@ -689,7 +690,7 @@ always @(posedge CLK) begin
 					reg [4:0] next_pulse_count;
 					reg [4:0] pulse_target;
 
-					if (frame_pos == 0) sample_ready <= 0;
+					sample_ready <= 0;
 
 					new_level = sample_level;
 					if (bits_per_sample == 8) begin
