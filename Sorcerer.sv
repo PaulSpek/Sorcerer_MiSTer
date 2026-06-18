@@ -592,6 +592,9 @@ always @(posedge CLK) begin
 		tape_checksum <= 0;
 		tape_seen_header <= 0;
 		tape_expect_checksum <= 0;
+		RAM_WR <= 1;
+		RAM_ADDR <= 16'h2000;
+		RAM_DATA <= 8'hA5;
 		UART_RX <= 1;
 	end else begin
 		if (DL & accept) begin
@@ -647,6 +650,9 @@ always @(posedge CLK) begin
 							pulse_kind <= 0;
 							frame_bytes <= (bits_per_sample == 16) ? (channels > 1 ? 3'd4 : 3'd2) :
 							               (channels > 1 ? 3'd2 : 3'd1);
+							RAM_WR <= 1;
+							RAM_ADDR <= 16'h2001;
+							RAM_DATA <= 8'hD0;
 							if (audio_format != 1) invalid <= 1;
 							if (bits_per_sample != 8 && bits_per_sample != 16) invalid <= 1;
 						end else begin
@@ -743,6 +749,9 @@ always @(posedge CLK) begin
 													tape_block_pos <= 0;
 													tape_checksum <= 0;
 													tape_expect_checksum <= 0;
+													RAM_WR <= 1;
+													RAM_ADDR <= 16'h2002;
+													RAM_DATA <= 8'h01;
 												end else if (tape_byte != 8'h00) begin
 													invalid <= 1;
 												end
