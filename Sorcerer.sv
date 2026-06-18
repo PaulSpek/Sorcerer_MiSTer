@@ -212,7 +212,8 @@ localparam CONF_STR = {
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[2],TV Mode,NTSC,PAL;",
 	"O[4:3],Noise,White,Red,Green,Blue;",
-	"O[5],WAV polarity,Normal,Inverted;",
+	"O[8],WAV polarity,Normal,Inverted;",
+	"O[9],WAV baud,300,1200;",
 	"-;",
 	"F1,BIN,Load BIN;",
 	"F2,WAV,Load WAV;",
@@ -337,14 +338,14 @@ always @(posedge clk12) begin
 end
 
 wire        uart_en = 1'b0;
-wire        wav_cass_in;
+wire        wav_uart_rx;
 wire        wav_active;
 
 always @(posedge clk12) begin
 `ifdef USE_AUDIO_IN
 	cass_in[0] <= AUDIO_IN;
 `else
-	cass_in[0] <= wav_active ? wav_cass_in : UART_RXD;
+	cass_in[0] <= UART_RXD;
 `endif
 	cass_in[1] <= cass_in[0];
 end
@@ -356,9 +357,10 @@ wav_cass_loader wav_cass_loader
 	.DL(ioctl_download & (ioctl_index == IOCTL_WAV)),
 	.DL_WE(ioctl_wr),
 	.DL_DATA(ioctl_dout[7:0]),
-	.INVERT(status[5]),
+	.INVERT(status[8]),
+	.BAUD_1200(status[9]),
 	.WAIT(ioctl_wait),
-	.CASS_OUT(wav_cass_in),
+	.UART_RX(wav_uart_rx),
 	.ACTIVE(wav_active)
 );
 
@@ -397,6 +399,8 @@ sorcerer sorcerer (
 	.VIDEO(video),
 	.AUDIO(audio),
 	.CASS_IN(cass_in[1]),
+	.CASS_UART_RX(wav_uart_rx),
+	.CASS_UART_EN(wav_active),
 	.CASS_OUT(cass_out),
 	.CASS_CTRL(cass_motor),
 	.PAL(1'b1),
@@ -487,8 +491,9 @@ module wav_cass_loader
 	input        DL_WE,
 	input  [7:0] DL_DATA,
 	input        INVERT,
+	input        BAUD_1200,
 	output       WAIT,
-	output reg   CASS_OUT,
+	output reg   UART_RX,
 	output       ACTIVE
 );
 
@@ -518,8 +523,11 @@ reg [15:0] bits_per_sample;
 reg  [2:0] frame_pos;
 reg  [2:0] frame_bytes;
 reg [31:0] sample_acc;
+reg  [7:0] edge_count;
 reg        sample_ready;
 reg        invalid;
+reg        sample_level;
+reg        have_edge;
 
 wire starting = DL & ~dl_d;
 wire stopping = ~DL & dl_d;
@@ -548,9 +556,12 @@ always @(posedge CLK) begin
 		frame_pos <= 0;
 		frame_bytes <= 1;
 		sample_acc <= 0;
+		edge_count <= 0;
 		sample_ready <= 1;
 		invalid <= 0;
-		CASS_OUT <= 0;
+		sample_level <= 0;
+		have_edge <= 0;
+		UART_RX <= 1;
 	end else if (stopping) begin
 		state <= ST_DONE;
 		sample_ready <= 0;
@@ -613,6 +624,7 @@ always @(posedge CLK) begin
 							state <= ST_DATA;
 							frame_pos <= 0;
 							sample_acc <= 0;
+							edge_count <= 0;
 							sample_ready <= 1;
 							frame_bytes <= (bits_per_sample == 16) ? (channels > 1 ? 3'd4 : 3'd2) :
 							               (channels > 1 ? 3'd2 : 3'd1);
@@ -662,12 +674,31 @@ always @(posedge CLK) begin
 				end
 
 				ST_DATA: begin
+					reg new_level;
+					reg [7:0] edge_threshold;
+
 					if (frame_pos == 0) sample_ready <= 0;
 
+					new_level = sample_level;
 					if (bits_per_sample == 8) begin
-						if (frame_pos == 0) CASS_OUT <= DL_DATA[7] ^ INVERT;
+						if (frame_pos == 0) new_level = DL_DATA[7] ^ INVERT;
 					end else begin
-						if (frame_pos == 1) CASS_OUT <= DL_DATA[7] ^ INVERT;
+						if (frame_pos == 1) new_level = DL_DATA[7] ^ INVERT;
+					end
+
+					if (frame_pos == frame_bytes - 1'd1) begin
+						edge_threshold = BAUD_1200 ? 8'd28 : 8'd14;
+
+						if (new_level != sample_level) begin
+							if (have_edge) begin
+								UART_RX <= edge_count <= edge_threshold;
+							end
+							edge_count <= 0;
+							have_edge <= 1;
+						end else if (edge_count != 8'hFF) begin
+							edge_count <= edge_count + 1'd1;
+						end
+						sample_level <= new_level;
 					end
 
 					if (frame_pos == frame_bytes - 1'd1)

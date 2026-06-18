@@ -29,6 +29,8 @@ module sorcerer (
 	output        VIDEO,
 	output reg [13:0] AUDIO,
 	input         CASS_IN,
+	input         CASS_UART_RX,
+	input         CASS_UART_EN,
 	output        CASS_OUT,
 	output        CASS_CTRL,
 	input         PAL,
@@ -372,7 +374,7 @@ gen_uart_ay_31015 uart (
 	.nb(cpu_dout[1:0]),  // word length
 	.eps(cpu_dout[3]), // even parity select
 	// uart pins
-	.rx(rs232_sel ? UART_RX : decoder[2]),
+	.rx(CASS_UART_EN ? CASS_UART_RX : rs232_sel ? UART_RX : decoder[2]),
 	.tx(UART_TX)
 );
 
