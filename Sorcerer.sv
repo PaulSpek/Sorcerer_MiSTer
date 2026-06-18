@@ -249,6 +249,7 @@ localparam [1:0] IOCTL_TAPE = 2'd3;
 
 wire wav_download = ioctl_download & (ioctl_index == IOCTL_WAV);
 wire core_download = ioctl_download & (ioctl_index != IOCTL_WAV);
+wire cpu_download = core_download | wav_download;
 
 wire [21:0] gamma_bus;
 wire forced_scandoubler;
@@ -343,6 +344,9 @@ end
 wire        uart_en = 1'b0;
 wire        wav_uart_rx;
 wire        wav_active;
+wire        wav_ram_wr;
+wire [15:0] wav_ram_addr;
+wire  [7:0] wav_ram_data;
 
 always @(posedge clk12) begin
 `ifdef USE_AUDIO_IN
@@ -364,7 +368,10 @@ wav_cass_loader wav_cass_loader
 	.BAUD_1200(status[9]),
 	.WAIT(ioctl_wait),
 	.UART_RX(wav_uart_rx),
-	.ACTIVE(wav_active)
+	.ACTIVE(wav_active),
+	.RAM_WR(wav_ram_wr),
+	.RAM_ADDR(wav_ram_addr),
+	.RAM_DATA(wav_ram_data)
 );
 
 `ifdef USE_EXPANSION
@@ -426,7 +433,7 @@ sorcerer sorcerer (
 	.UART_RX(UART_RXD),
 	.UART_TX(uart_tx),
 
-	.DL(core_download),
+	.DL(cpu_download),
 	.DL_CLK(clk_sys),
 	.DL_ADDR(ioctl_addr[15:0]),
 	.DL_DATA(ioctl_dout),
@@ -444,10 +451,10 @@ dpram #(
     .addr_width_g (16)
 ) ram (
     .clock     (clk_sys),
-    .ram_cs    (ram_rd),
-    .wren_a    (ram_wr),
-    .address_a (ram_addr),
-    .data_a    (ram_din),
+	.ram_cs    (ram_rd),
+	.wren_a    (wav_ram_wr | ram_wr),
+    .address_a (wav_ram_wr ? wav_ram_addr : ram_addr),
+    .data_a    (wav_ram_wr ? wav_ram_data : ram_din),
     .q_a       (ram_dout)
 );
 
@@ -497,7 +504,10 @@ module wav_cass_loader
 	input        BAUD_1200,
 	output       WAIT,
 	output reg   UART_RX,
-	output       ACTIVE
+	output       ACTIVE,
+	output reg   RAM_WR,
+	output reg [15:0] RAM_ADDR,
+	output reg  [7:0] RAM_DATA
 );
 
 localparam [2:0]
@@ -529,22 +539,27 @@ reg        pulse_kind;
 reg        invalid;
 reg        sample_level;
 reg        have_edge;
-reg        replay_active;
-reg [16:0] bit_wr_addr;
-reg [16:0] bit_rd_addr;
-reg [31:0] replay_timer;
-reg  [7:0] bit_buf [0:16383];
+reg        uart_in_byte;
+reg  [3:0] uart_bit_pos;
+reg  [7:0] uart_byte;
+reg  [6:0] tape_header_pos;
+reg [15:0] tape_length;
+reg [15:0] tape_load_addr;
+reg [15:0] tape_data_count;
+reg  [7:0] tape_block_pos;
+reg  [7:0] tape_checksum;
+reg        tape_seen_header;
+reg        tape_expect_checksum;
 
 wire starting = DL & ~dl_d;
-wire stopping = ~DL & dl_d;
 wire accept = DL_WE;
-wire [31:0] bit_ticks = BAUD_1200 ? 32'd40000 : 32'd160000;
 
 assign WAIT = 1'b0;
-assign ACTIVE = (DL | replay_active) & ~invalid;
+assign ACTIVE = DL & ~invalid;
 
 always @(posedge CLK) begin
 	dl_d <= DL;
+	RAM_WR <= 0;
 
 	if (RESET | starting) begin
 		state <= ST_HEADER;
@@ -566,33 +581,19 @@ always @(posedge CLK) begin
 		invalid <= 0;
 		sample_level <= 0;
 		have_edge <= 0;
-		replay_active <= 0;
-		bit_wr_addr <= 0;
-		bit_rd_addr <= 0;
-		replay_timer <= 0;
-		UART_RX <= 1;
-	end else if (stopping) begin
-		state <= ST_DONE;
-		bit_rd_addr <= 0;
-		replay_timer <= 0;
-		replay_active <= (bit_wr_addr != 0) & ~invalid;
+		uart_in_byte <= 0;
+		uart_bit_pos <= 0;
+		uart_byte <= 0;
+		tape_header_pos <= 0;
+		tape_length <= 0;
+		tape_load_addr <= 0;
+		tape_data_count <= 0;
+		tape_block_pos <= 0;
+		tape_checksum <= 0;
+		tape_seen_header <= 0;
+		tape_expect_checksum <= 0;
 		UART_RX <= 1;
 	end else begin
-		if (replay_active) begin
-			if (replay_timer == 0) begin
-				if (bit_rd_addr < bit_wr_addr) begin
-					UART_RX <= bit_buf[bit_rd_addr[16:3]][bit_rd_addr[2:0]];
-					bit_rd_addr <= bit_rd_addr + 1'd1;
-					replay_timer <= bit_ticks - 1'd1;
-				end else begin
-					replay_active <= 0;
-					UART_RX <= 1;
-				end
-			end else begin
-				replay_timer <= replay_timer - 1'd1;
-			end
-		end
-
 		if (DL & accept) begin
 			case (state)
 				ST_HEADER: begin
@@ -697,6 +698,7 @@ always @(posedge CLK) begin
 					reg is_short;
 					reg [4:0] next_pulse_count;
 					reg [4:0] pulse_target;
+					reg [7:0] tape_byte;
 
 					new_level = sample_level;
 					if (bits_per_sample == 8) begin
@@ -715,11 +717,64 @@ always @(posedge CLK) begin
 								next_pulse_count = (is_short == pulse_kind) ? pulse_count + 1'd1 : 5'd1;
 
 								if (next_pulse_count >= pulse_target) begin
-									if (bit_wr_addr != 17'h1FFFF) begin
-										bit_buf[bit_wr_addr[16:3]][bit_wr_addr[2:0]] <= is_short;
-										bit_wr_addr <= bit_wr_addr + 1'd1;
+									UART_RX <= is_short;
+
+									if (!uart_in_byte) begin
+										if (!is_short) begin
+											uart_in_byte <= 1;
+											uart_bit_pos <= 0;
+											uart_byte <= 0;
+										end
+									end else if (uart_bit_pos != 8) begin
+										uart_byte[uart_bit_pos] <= is_short;
+										uart_bit_pos <= uart_bit_pos + 1'd1;
 									end else begin
-										invalid <= 1;
+										uart_in_byte <= 0;
+										if (is_short) begin
+											tape_byte = uart_byte;
+
+											if (!tape_seen_header) begin
+												if (tape_byte == 8'h01) begin
+													tape_seen_header <= 1;
+													tape_header_pos <= 1;
+													tape_length <= 0;
+													tape_load_addr <= 0;
+													tape_data_count <= 0;
+													tape_block_pos <= 0;
+													tape_checksum <= 0;
+													tape_expect_checksum <= 0;
+												end else if (tape_byte != 8'h00) begin
+													invalid <= 1;
+												end
+											end else if (tape_header_pos != 7'd119) begin
+												case (tape_header_pos)
+													7'd8:  tape_length[7:0] <= tape_byte;
+													7'd9:  tape_length[15:8] <= tape_byte;
+													7'd10: tape_load_addr[7:0] <= tape_byte;
+													7'd11: tape_load_addr[15:8] <= tape_byte;
+													default: ;
+												endcase
+												tape_header_pos <= tape_header_pos + 1'd1;
+											end else if (tape_expect_checksum) begin
+												if ((tape_checksum + tape_byte) != 8'h00) invalid <= 1;
+												tape_checksum <= 0;
+												tape_expect_checksum <= 0;
+											end else if (tape_data_count != tape_length) begin
+												RAM_WR <= 1;
+												RAM_ADDR <= tape_load_addr + tape_data_count;
+												RAM_DATA <= tape_byte;
+												tape_checksum <= tape_checksum + tape_byte;
+												tape_data_count <= tape_data_count + 1'd1;
+												if (tape_block_pos == 8'hFF) begin
+													tape_block_pos <= 0;
+													tape_expect_checksum <= 1;
+												end else begin
+													tape_block_pos <= tape_block_pos + 1'd1;
+												end
+											end
+										end else begin
+											invalid <= 1;
+										end
 									end
 									pulse_count <= 0;
 								end else begin
