@@ -500,8 +500,6 @@ module wav_cass_loader
 	output       ACTIVE
 );
 
-localparam CLK_FREQ = 32'd48000000;
-
 localparam [2:0]
 	ST_HEADER     = 3'd0,
 	ST_CHUNK_ID   = 3'd1,
@@ -525,24 +523,25 @@ reg [31:0] sample_rate;
 reg [15:0] bits_per_sample;
 reg  [2:0] frame_pos;
 reg  [2:0] frame_bytes;
-reg [31:0] sample_acc;
 reg  [7:0] edge_count;
 reg  [4:0] pulse_count;
 reg        pulse_kind;
-reg        sample_ready;
 reg        invalid;
 reg        sample_level;
 reg        have_edge;
+reg        replay_active;
+reg [16:0] bit_wr_addr;
+reg [16:0] bit_rd_addr;
+reg [31:0] replay_timer;
+reg  [7:0] bit_buf [0:16383];
 
 wire starting = DL & ~dl_d;
 wire stopping = ~DL & dl_d;
-wire in_data_byte = state == ST_DATA;
-wire accept = DL_WE & ~(in_data_byte & ~sample_ready);
-wire [31:0] sample_rate_safe = sample_rate ? sample_rate : 32'd44100;
-wire [31:0] byte_rate_safe = sample_rate_safe * frame_bytes;
+wire accept = DL_WE;
+wire [31:0] bit_ticks = BAUD_1200 ? 32'd40000 : 32'd160000;
 
-assign WAIT = DL & in_data_byte & ~sample_ready;
-assign ACTIVE = DL & ~invalid;
+assign WAIT = 1'b0;
+assign ACTIVE = (DL | replay_active) & ~invalid;
 
 always @(posedge CLK) begin
 	dl_d <= DL;
@@ -561,29 +560,40 @@ always @(posedge CLK) begin
 		bits_per_sample <= 8;
 		frame_pos <= 0;
 		frame_bytes <= 1;
-		sample_acc <= 0;
 		edge_count <= 0;
 		pulse_count <= 0;
 		pulse_kind <= 0;
-		sample_ready <= 1;
 		invalid <= 0;
 		sample_level <= 0;
 		have_edge <= 0;
+		replay_active <= 0;
+		bit_wr_addr <= 0;
+		bit_rd_addr <= 0;
+		replay_timer <= 0;
 		UART_RX <= 1;
 	end else if (stopping) begin
 		state <= ST_DONE;
-		sample_ready <= 0;
-	end else if (DL) begin
-		if (state == ST_DATA && ~sample_ready) begin
-			if (sample_acc >= (CLK_FREQ - byte_rate_safe)) begin
-				sample_acc <= sample_acc + byte_rate_safe - CLK_FREQ;
-				sample_ready <= 1;
+		bit_rd_addr <= 0;
+		replay_timer <= 0;
+		replay_active <= (bit_wr_addr != 0) & ~invalid;
+		UART_RX <= 1;
+	end else begin
+		if (replay_active) begin
+			if (replay_timer == 0) begin
+				if (bit_rd_addr < bit_wr_addr) begin
+					UART_RX <= bit_buf[bit_rd_addr[16:3]][bit_rd_addr[2:0]];
+					bit_rd_addr <= bit_rd_addr + 1'd1;
+					replay_timer <= bit_ticks - 1'd1;
+				end else begin
+					replay_active <= 0;
+					UART_RX <= 1;
+				end
 			end else begin
-				sample_acc <= sample_acc + byte_rate_safe;
+				replay_timer <= replay_timer - 1'd1;
 			end
 		end
 
-		if (accept) begin
+		if (DL & accept) begin
 			case (state)
 				ST_HEADER: begin
 					case (header_pos)
@@ -631,11 +641,9 @@ always @(posedge CLK) begin
 						end else if (chunk_id == "data") begin
 							state <= ST_DATA;
 							frame_pos <= 0;
-							sample_acc <= 0;
 							edge_count <= 0;
 							pulse_count <= 0;
 							pulse_kind <= 0;
-							sample_ready <= 1;
 							frame_bytes <= (bits_per_sample == 16) ? (channels > 1 ? 3'd4 : 3'd2) :
 							               (channels > 1 ? 3'd2 : 3'd1);
 							if (audio_format != 1) invalid <= 1;
@@ -690,8 +698,6 @@ always @(posedge CLK) begin
 					reg [4:0] next_pulse_count;
 					reg [4:0] pulse_target;
 
-					sample_ready <= 0;
-
 					new_level = sample_level;
 					if (bits_per_sample == 8) begin
 						if (frame_pos == 0) new_level = DL_DATA[7] ^ INVERT;
@@ -709,7 +715,12 @@ always @(posedge CLK) begin
 								next_pulse_count = (is_short == pulse_kind) ? pulse_count + 1'd1 : 5'd1;
 
 								if (next_pulse_count >= pulse_target) begin
-									UART_RX <= is_short;
+									if (bit_wr_addr != 17'h1FFFF) begin
+										bit_buf[bit_wr_addr[16:3]][bit_wr_addr[2:0]] <= is_short;
+										bit_wr_addr <= bit_wr_addr + 1'd1;
+									end else begin
+										invalid <= 1;
+									end
 									pulse_count <= 0;
 								end else begin
 									pulse_count <= next_pulse_count;
@@ -731,7 +742,6 @@ always @(posedge CLK) begin
 
 					if (chunk_left == 1) begin
 						state <= ST_DONE;
-						sample_ready <= 0;
 					end
 					chunk_left <= chunk_left - 1'd1;
 				end
