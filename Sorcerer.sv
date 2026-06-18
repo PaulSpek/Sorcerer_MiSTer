@@ -213,8 +213,8 @@ localparam CONF_STR = {
 	"O[2],TV Mode,NTSC,PAL;",
 	"O[4:3],Noise,White,Red,Green,Blue;",
 	"-;",
-	"F1,BIN,Load system ROM;",
-	"F2,BIN,Quickload BIN;",
+	"F1,BIN,Load PAC *.BIN;",
+	"F2,BIN,Load BIN *.BIN;",
 	"-;",
 	"P2,Test Page 2;",
 	"P2-;",
@@ -239,9 +239,9 @@ wire ioctl_wr;
 wire [1:0] ioctl_index;
 wire [15:0] ioctl_dout;
 
-localparam [1:0] IOCTL_ROM   = 2'd0;
+localparam [1:0] IOCTL_CART  = 2'd0;
 localparam [1:0] IOCTL_QUICK = 2'd1;
-localparam [1:0] IOCTL_PAC   = 2'd2;
+localparam [1:0] IOCTL_ROM   = 2'd2;
 localparam [1:0] IOCTL_TAPE  = 2'd3;
 
 wire [21:0] gamma_bus;
@@ -408,7 +408,7 @@ sorcerer sorcerer (
 	.DL_WE(ioctl_wr),
 	.DL_ROM(ioctl_index == IOCTL_ROM),
 	.DL_QUICK(ioctl_index == IOCTL_QUICK),
-	.DL_PAC(ioctl_index == IOCTL_PAC),
+	.DL_PAC(ioctl_index == IOCTL_CART),
 	.DL_TAPE(ioctl_index == IOCTL_TAPE),
 
 	.UNL_PAC(status[1]),
