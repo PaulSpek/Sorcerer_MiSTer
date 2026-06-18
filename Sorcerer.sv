@@ -524,6 +524,8 @@ reg  [2:0] frame_pos;
 reg  [2:0] frame_bytes;
 reg [31:0] sample_acc;
 reg  [7:0] edge_count;
+reg  [4:0] pulse_count;
+reg        pulse_kind;
 reg        sample_ready;
 reg        invalid;
 reg        sample_level;
@@ -557,6 +559,8 @@ always @(posedge CLK) begin
 		frame_bytes <= 1;
 		sample_acc <= 0;
 		edge_count <= 0;
+		pulse_count <= 0;
+		pulse_kind <= 0;
 		sample_ready <= 1;
 		invalid <= 0;
 		sample_level <= 0;
@@ -625,6 +629,8 @@ always @(posedge CLK) begin
 							frame_pos <= 0;
 							sample_acc <= 0;
 							edge_count <= 0;
+							pulse_count <= 0;
+							pulse_kind <= 0;
 							sample_ready <= 1;
 							frame_bytes <= (bits_per_sample == 16) ? (channels > 1 ? 3'd4 : 3'd2) :
 							               (channels > 1 ? 3'd2 : 3'd1);
@@ -676,6 +682,9 @@ always @(posedge CLK) begin
 				ST_DATA: begin
 					reg new_level;
 					reg [7:0] edge_threshold;
+					reg is_short;
+					reg [4:0] next_pulse_count;
+					reg [4:0] pulse_target;
 
 					if (frame_pos == 0) sample_ready <= 0;
 
@@ -691,7 +700,17 @@ always @(posedge CLK) begin
 
 						if (new_level != sample_level) begin
 							if (have_edge) begin
-								UART_RX <= edge_count <= edge_threshold;
+								is_short = edge_count <= edge_threshold;
+								pulse_target = BAUD_1200 ? (is_short ? 5'd2 : 5'd1) : (is_short ? 5'd16 : 5'd8);
+								next_pulse_count = (is_short == pulse_kind) ? pulse_count + 1'd1 : 5'd1;
+
+								if (next_pulse_count >= pulse_target) begin
+									UART_RX <= is_short;
+									pulse_count <= 0;
+								end else begin
+									pulse_count <= next_pulse_count;
+								end
+								pulse_kind <= is_short;
 							end
 							edge_count <= 0;
 							have_edge <= 1;
