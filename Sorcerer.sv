@@ -572,9 +572,9 @@ always @(posedge CLK) begin
 		audio_format <= 1;
 		channels <= 1;
 		sample_rate <= 44100;
-		bits_per_sample <= 8;
+		bits_per_sample <= 16;
 		frame_pos <= 0;
-		frame_bytes <= 1;
+		frame_bytes <= 2;
 		edge_count <= 0;
 		pulse_count <= 0;
 		pulse_kind <= 0;
@@ -600,25 +600,11 @@ always @(posedge CLK) begin
 		if (DL & accept) begin
 			case (state)
 				ST_HEADER: begin
-					case (header_pos)
-						0: if (DL_DATA != "R") invalid <= 1;
-						1: if (DL_DATA != "I") invalid <= 1;
-						2: if (DL_DATA != "F") invalid <= 1;
-						3: if (DL_DATA != "F") invalid <= 1;
-						8: if (DL_DATA != "W") invalid <= 1;
-						9: if (DL_DATA != "A") invalid <= 1;
-						10: if (DL_DATA != "V") invalid <= 1;
-						11: if (DL_DATA != "E") invalid <= 1;
-						default: ;
-					endcase
-
-					if (header_pos == 11) begin
-						state <= ST_CHUNK_ID;
-						header_pos <= 0;
+					chunk_id <= {chunk_id[23:0], DL_DATA};
+					if ({chunk_id[23:0], DL_DATA} == "data") begin
+						state <= ST_CHUNK_SIZE;
 						chunk_pos <= 0;
-						chunk_id <= 0;
-					end else begin
-						header_pos <= header_pos + 1'd1;
+						chunk_size <= 0;
 					end
 				end
 
@@ -639,25 +625,18 @@ always @(posedge CLK) begin
 						chunk_left <= chunk_size | ({24'd0, DL_DATA} << 24);
 						chunk_pos <= 0;
 
-						if (chunk_id == "fmt ") begin
-							state <= ST_FMT;
-							fmt_pos <= 0;
-						end else if (chunk_id == "data") begin
-							state <= ST_DATA;
-							frame_pos <= 0;
-							edge_count <= 0;
-							pulse_count <= 0;
-							pulse_kind <= 0;
-							frame_bytes <= (bits_per_sample == 16) ? (channels > 1 ? 3'd4 : 3'd2) :
-							               (channels > 1 ? 3'd2 : 3'd1);
-							RAM_WR <= 1;
-							RAM_ADDR <= 16'h2001;
-							RAM_DATA <= 8'hD0;
-							if (audio_format != 1) invalid <= 1;
-							if (bits_per_sample != 8 && bits_per_sample != 16) invalid <= 1;
-						end else begin
-							state <= ST_SKIP;
-						end
+						state <= ST_DATA;
+						frame_pos <= 0;
+						edge_count <= 0;
+						pulse_count <= 0;
+						pulse_kind <= 0;
+						frame_bytes <= (bits_per_sample == 16) ? (channels > 1 ? 3'd4 : 3'd2) :
+						               (channels > 1 ? 3'd2 : 3'd1);
+						RAM_WR <= 1;
+						RAM_ADDR <= 16'h2001;
+						RAM_DATA <= 8'hD0;
+						if (audio_format != 1) invalid <= 1;
+						if (bits_per_sample != 8 && bits_per_sample != 16) invalid <= 1;
 					end else begin
 						chunk_pos <= chunk_pos + 1'd1;
 					end
