@@ -247,6 +247,9 @@ localparam [1:0] IOCTL_WAV  = 2'd1;
 localparam [1:0] IOCTL_PAC  = 2'd2;
 localparam [1:0] IOCTL_TAPE = 2'd3;
 
+wire wav_download = ioctl_download & (ioctl_index == IOCTL_WAV);
+wire core_download = ioctl_download & (ioctl_index != IOCTL_WAV);
+
 wire [21:0] gamma_bus;
 wire forced_scandoubler;
 wire   [1:0] buttons;
@@ -354,7 +357,7 @@ wav_cass_loader wav_cass_loader
 (
 	.CLK(clk_sys),
 	.RESET(reset),
-	.DL(ioctl_download & (ioctl_index == IOCTL_WAV)),
+	.DL(wav_download),
 	.DL_WE(ioctl_wr),
 	.DL_DATA(ioctl_dout[7:0]),
 	.INVERT(status[8]),
@@ -375,9 +378,9 @@ assign UART_TXD = uart_en ? uart_tx : ~cass_motor;
 
 reg rom_loaded = 0;
 always @(posedge clk_sys) begin
-    reg ioctl_downlD;
-    ioctl_downlD <= ioctl_download;
-    if (ioctl_downlD & ~ioctl_download) rom_loaded <= 1;
+    reg core_downlD;
+    core_downlD <= core_download;
+    if (core_downlD & ~core_download) rom_loaded <= 1;
 end
 
 wire [16:0] ram_addr;
@@ -423,7 +426,7 @@ sorcerer sorcerer (
 	.UART_RX(UART_RXD),
 	.UART_TX(uart_tx),
 
-	.DL(ioctl_download),
+	.DL(core_download),
 	.DL_CLK(clk_sys),
 	.DL_ADDR(ioctl_addr[15:0]),
 	.DL_DATA(ioctl_dout),
