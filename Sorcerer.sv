@@ -283,7 +283,10 @@ pll pll
 	.outclk_1(clk12),
 );
 
-wire reset = RESET | status[0] | buttons[1] | ~rom_loaded;
+reg rom_loaded = 0;
+reg pac_load_reset = 0;
+reg [3:0] pac_reset_cnt = 0;
+wire reset = RESET | status[0] | buttons[1] | ~rom_loaded | pac_load_reset;
 
 wire [1:0] col = status[4:3];
 
@@ -353,11 +356,18 @@ assign EXP7 = 1'bZ;
 assign UART_TXD = uart_en ? uart_tx : ~cass_motor;
 `endif
 
-reg rom_loaded = 0;
 always @(posedge clk_sys) begin
     reg ioctl_downlD;
+
     ioctl_downlD <= ioctl_download;
-    if (ioctl_downlD & ~ioctl_download) rom_loaded <= 1;
+    pac_load_reset <= |pac_reset_cnt;
+
+    if (ioctl_downlD & ~ioctl_download) begin
+        rom_loaded <= 1;
+        if (ioctl_index == IOCTL_PAC) pac_reset_cnt <= 4'hF;
+    end else if (pac_reset_cnt) begin
+        pac_reset_cnt <= pac_reset_cnt - 1'd1;
+    end
 end
 
 wire [16:0] ram_addr;
@@ -391,7 +401,7 @@ sorcerer sorcerer (
 	.KEY_CODE(key_code),
 	.UPCASE(upcase),
 
-	.RAM_SIZE(2),
+	.RAM_SIZE(3),
 	.RAM_ADDR(ram_addr),
 	.RAM_RD(ram_rd),
 	.RAM_WR(ram_wr),

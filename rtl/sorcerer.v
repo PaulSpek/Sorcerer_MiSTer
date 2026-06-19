@@ -250,8 +250,11 @@ always @(posedge CLK12) begin
 end
 
 wire        romcs = romen | (up8k & ~cpu_addr[12]) /* synthesis keep */;
-wire        ramsel = (RAM_SIZE == 0 & ~|cpu_addr[14:13]) | (RAM_SIZE == 1 & ~cpu_addr[14]) | RAM_SIZE == 2;
-wire        ramen = rfsh_n & ~mreq_n & ~cpu_addr[15] & ramsel & ~romen /* synthesis keep */;
+wire        ramsel = ((RAM_SIZE == 0) & ~|cpu_addr[14:13]) |
+                     ((RAM_SIZE == 1) & ~cpu_addr[14]) |
+                     ((RAM_SIZE == 2) & ~cpu_addr[15]) |
+                     ((RAM_SIZE == 3) & (cpu_addr[15:14] != 2'b11));
+wire        ramen = rfsh_n & ~mreq_n & ramsel & ~romen /* synthesis keep */;
 wire        pacsel = rfsh_n & ~mreq_n & cpu_addr[15:13] == 3'b110 & pac_loaded;
 
 wire        ioen = ~iorq_n & &cpu_addr[7:2];
@@ -361,7 +364,7 @@ always @(posedge DL_CLK) begin : quickload
 			Q_PAYLOAD: begin
 				if (payload_left == 0) begin
 					end_addr[15:8] <= DL_DATA;
-					if ({DL_DATA, end_addr[7:0]} < load_addr || load_addr[15] || DL_DATA[7]) begin
+					if ({DL_DATA, end_addr[7:0]} < load_addr || load_addr[15:14] == 2'b11 || DL_DATA[7:6] == 2'b11) begin
 						quick_error <= 1;
 					end else begin
 						payload_addr <= load_addr;
@@ -382,7 +385,7 @@ always @(posedge DL_CLK) begin : quickload
 	end
 end
 
-assign      RAM_ADDR = quick_dl ? {1'b0, quick_addr} : tape_dl ? {1'b1, DL_ADDR[15:0]} : rfsh_n ? {2'b00, cpu_addr[14:0]} : {1'b1, tape_emu_addr};
+assign      RAM_ADDR = quick_dl ? {1'b0, quick_addr} : tape_dl ? {1'b1, DL_ADDR[15:0]} : rfsh_n ? {1'b0, cpu_addr[15:0]} : {1'b1, tape_emu_addr};
 assign      RAM_RD = (quick_dl | tape_dl) ? 1'b0 : !rfsh_n | (ramen & ~rd_n);
 assign      RAM_WR = quick_dl ? |quick_wr : tape_dl ? |tape_wr : ramen & ~wr_n;
 assign      RAM_DIN = quick_dl ? quick_data : tape_dl ? DL_DATA : cpu_dout;
