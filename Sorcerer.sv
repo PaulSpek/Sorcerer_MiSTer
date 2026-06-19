@@ -299,19 +299,6 @@ wire HSync;
 wire VBlank;
 wire VSync;
 wire [7:0] video;
-wire ce_pix;
-
-reg [1:0] count = 2'b00; // 2-bit counter
-always @(posedge clk_sys or posedge reset) begin
-    if (reset) begin
-        count   <= 2'b00;
-        ce_pix <= 0;
-    end else begin
-        count <= count + 1;
-        if (count == 2'b11) // Toggle clk_out every 4 cycles
-            ce_pix <= ~ce_pix;
-    end
-end
 
 ////////////////////////////////////////////////////////////
 // Keyboard
@@ -446,16 +433,16 @@ wire video_rotated;
 //screen_rotate screen_rotate (.*);
 
 assign VGA_SL = 0;
-assign CLK_VIDEO = clk_sys;
-assign CE_PIXEL = ce_pix;
+assign CLK_VIDEO = clk12;
+assign CE_PIXEL = 1'b1;
 
 assign VGA_DE = ~(HBlank | VBlank);
 assign VGA_HS = HSync;
 assign VGA_VS = VSync;
 
-assign VGA_R = video ? 6'h3F : 6'h00;
-assign VGA_G = video ? 6'h3F : 6'h00;
-assign VGA_B = video ? 6'h3F : 6'h00;
+assign VGA_R = video ? 8'hFF : 8'h00;
+assign VGA_G = video ? 8'hFF : 8'h00;
+assign VGA_B = video ? 8'hFF : 8'h00;
 
 /*
 arcade_video #(256,24) arcade_video
