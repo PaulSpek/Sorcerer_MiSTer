@@ -385,7 +385,7 @@ sorcerer sorcerer (
 	.KEY_CODE(key_code),
 	.UPCASE(upcase),
 
-	.RAM_SIZE(2),
+	.RAM_SIZE(3),
 	.RAM_ADDR(ram_addr),
 	.RAM_RD(ram_rd),
 	.RAM_WR(ram_wr),
