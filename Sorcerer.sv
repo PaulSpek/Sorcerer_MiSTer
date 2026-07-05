@@ -217,14 +217,9 @@ localparam CONF_STR = {
 	"-;",
 	"F1,BIN,Load BIN;",
 	"F2,BIN,Load PAC;",
-	"-;",
-	"P2,Test Page 2;",
-	"P2-;",
-	"P2-, -= Options in page 2 =-;",
-	"P2-;",
-	"P2S0,DSK;",
-	"P2O[7:6],Option 2,1,2,3,4;",
-	"-;",
+	"F3,DAT,Load DiskBoot;",
+	"D0S0,DSK,Mount disk A;",
+	"D0S1,DSK,Mount disk B;",
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
@@ -240,11 +235,27 @@ wire [15:0] ioctl_addr;
 wire ioctl_wr;
 wire [1:0] ioctl_index;
 wire [15:0] ioctl_dout;
+wire ioctl_wait;
+wire quick_clear_busy;
+wire diskboot_ready;
+
+wire [1:0] img_mounted;
+wire       img_readonly;
+wire [63:0] img_size;
+wire [31:0] sd_lba[2];
+wire [5:0]  sd_blk_cnt[2];
+wire [1:0]  sd_rd;
+wire [1:0]  sd_wr;
+wire [1:0]  sd_ack;
+wire [13:0] sd_buff_addr;
+wire [7:0]  sd_buff_dout;
+wire [7:0]  sd_buff_din[2];
+wire        sd_buff_wr;
 
 localparam [1:0] IOCTL_ROM   = 2'd0;
 localparam [1:0] IOCTL_QUICK = 2'd1;
 localparam [1:0] IOCTL_PAC   = 2'd2;
-localparam [1:0] IOCTL_TAPE  = 2'd3;
+localparam [1:0] IOCTL_DISKBOOT = 2'd3;
 
 wire [21:0] gamma_bus;
 wire forced_scandoubler;
@@ -252,7 +263,9 @@ wire   [1:0] buttons;
 wire [127:0] status;
 wire  [10:0] ps2_key;
 
-hps_io #(.CONF_STR(CONF_STR)) hps_io
+assign ioctl_wait = ioctl_download && (ioctl_index == IOCTL_QUICK) && quick_clear_busy;
+
+hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -263,15 +276,29 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({status[5]}),
+	.status_menumask({14'd0, 1'b1, ~diskboot_ready}),
 	
 	.ps2_key(ps2_key),
+
+	.img_mounted(img_mounted),
+	.img_readonly(img_readonly),
+	.img_size(img_size),
+	.sd_lba(sd_lba),
+	.sd_blk_cnt(sd_blk_cnt),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din),
+	.sd_buff_wr(sd_buff_wr),
 	
     .ioctl_download(ioctl_download),
     .ioctl_addr(ioctl_addr),
     .ioctl_dout(ioctl_dout),
     .ioctl_wr(ioctl_wr),
-    .ioctl_index(ioctl_index)
+    .ioctl_index(ioctl_index),
+    .ioctl_wait(ioctl_wait)
 );
 
 ///////////////////////   CLOCKS   ///////////////////////////////
@@ -282,7 +309,7 @@ pll pll
 	.refclk(CLK_50M),
 	.rst(0),
 	.outclk_0(clk_sys),
-	.outclk_1(clk12),
+	.outclk_1(clk12)
 );
 
 reg rom_loaded = 0;
@@ -363,6 +390,125 @@ wire [16:0] ram_addr;
 wire        ram_rd, ram_wr;
 wire  [7:0] ram_dout, ram_din;
 
+wire        disk_req;
+wire        disk_ack;
+wire        disk_wait;
+wire        disk_drive;
+wire  [6:0] disk_track;
+wire  [3:0] disk_sector;
+wire  [8:0] disk_buf_addr;
+wire  [7:0] disk_buf_dout;
+reg   [1:0] disk_mounted = 0;
+reg   [7:0] disk_buf[1024];
+reg   [8:0] disk_base = 0;
+reg         disk_ack_tgl = 0;
+reg         disk_busy = 0;
+reg         disk_rd = 0;
+reg         disk_start = 0;
+reg   [1:0] disk_gap = 0;
+reg         disk_hps_ack_seen = 0;
+reg         disk_data_ready = 0;
+reg         disk_need_second_block = 0;
+reg         disk_second_block = 0;
+reg         disk_wait_ack_clear = 0;
+reg         disk_wait_idle = 0;
+reg         disk_req_meta = 0;
+reg         disk_req_sync = 0;
+reg         disk_req_last = 0;
+reg         disk_req_pending = 0;
+reg         disk_active_drive = 0;
+reg  [31:0] disk_offset = 0;
+reg  [31:0] disk_lba = 0;
+wire  [9:0] disk_buf_rd_addr = {1'b0, disk_base} + {1'b0, disk_buf_addr};
+wire  [9:0] disk_buf_end_addr = {1'b0, disk_base} + 10'd269;
+wire  [9:0] disk_buf_wr_addr = {disk_second_block, sd_buff_addr[8:0]};
+wire  [8:0] disk_target_addr = (disk_need_second_block && !disk_second_block) ? 9'h1FF : disk_buf_end_addr[8:0];
+
+assign sd_wr = 2'b00;
+assign sd_buff_din[0] = 8'hFF;
+assign sd_buff_din[1] = 8'hFF;
+assign sd_lba[0] = disk_lba;
+assign sd_lba[1] = disk_lba;
+assign sd_blk_cnt[0] = 6'd0;
+assign sd_blk_cnt[1] = 6'd0;
+assign sd_rd = disk_rd ? (disk_active_drive ? 2'b10 : 2'b01) : 2'b00;
+assign disk_ack = disk_ack_tgl;
+assign disk_buf_dout = disk_buf[disk_buf_rd_addr];
+
+always @(posedge clk_sys) begin
+	reg [17:0] sector_linear;
+	reg [31:0] sector_offset;
+	reg  [9:0] sector_end_addr;
+
+	disk_req_meta <= disk_req;
+	disk_req_sync <= disk_req_meta;
+	disk_req_last <= disk_req_sync;
+	if (disk_gap != 0) disk_gap <= disk_gap - 1'd1;
+	if (disk_req_sync ^ disk_req_last) disk_req_pending <= 1;
+
+	if (img_mounted[0]) disk_mounted[0] <= 1;
+	if (img_mounted[1]) disk_mounted[1] <= 1;
+
+	if (sd_buff_wr) begin
+		disk_buf[disk_buf_wr_addr] <= sd_buff_dout;
+		if (disk_busy && (sd_buff_addr[8:0] == disk_target_addr))
+			disk_data_ready <= 1;
+	end
+
+	if (disk_start) begin
+		disk_start <= 0;
+		disk_rd <= 1;
+	end
+
+	if (disk_wait_ack_clear && !sd_ack[disk_active_drive]) begin
+		disk_wait_ack_clear <= 0;
+		disk_start <= 1;
+	end
+
+	if (disk_wait_idle && !sd_ack[disk_active_drive]) begin
+		disk_wait_idle <= 0;
+		disk_gap <= 2'd3;
+	end
+
+	if (~disk_busy && ~disk_start && !disk_wait_idle && (disk_gap == 0) && disk_req_pending && !sd_ack[disk_drive]) begin
+		disk_req_pending <= 0;
+		disk_active_drive <= disk_drive;
+		sector_linear = ({11'd0, disk_track} << 4) + {14'd0, disk_sector};
+		sector_offset = sector_linear * 18'd270;
+		sector_end_addr = {1'b0, sector_offset[8:0]} + 10'd269;
+		disk_offset <= sector_offset;
+		disk_lba <= sector_offset[31:9];
+		disk_base <= sector_offset[8:0];
+		disk_need_second_block <= (sector_end_addr > 10'd511);
+		disk_second_block <= 0;
+		disk_wait_ack_clear <= 0;
+		disk_busy <= 1;
+		disk_hps_ack_seen <= 0;
+		disk_data_ready <= 0;
+		disk_start <= 1;
+	end else if (disk_busy && sd_ack[disk_active_drive]) begin
+		disk_rd <= 0;
+		disk_hps_ack_seen <= 1;
+	end else if (disk_busy && disk_hps_ack_seen && disk_data_ready) begin
+		if (disk_need_second_block && !disk_second_block) begin
+			disk_lba <= disk_lba + 1'd1;
+			disk_second_block <= 1;
+			disk_wait_ack_clear <= 1;
+			disk_hps_ack_seen <= 0;
+			disk_data_ready <= 0;
+		end else begin
+			disk_busy <= 0;
+			disk_wait_idle <= 1;
+			disk_ack_tgl <= ~disk_ack_tgl;
+		end
+	end
+
+	if (!disk_busy) begin
+		disk_hps_ack_seen <= 0;
+		disk_wait_ack_clear <= 0;
+	end
+end
+
 reg   [1:0] cass_in;
 wire        cass_out;
 wire        cass_motor;
@@ -401,6 +547,7 @@ sorcerer sorcerer (
 	.UART_TX(uart_tx),
 
 	.DL(ioctl_download),
+	.DL_WAIT((ioctl_download && ioctl_index != IOCTL_DISKBOOT) || quick_clear_busy),
 	.DL_CLK(clk_sys),
 	.DL_ADDR(ioctl_addr[15:0]),
 	.DL_DATA(ioctl_dout),
@@ -408,7 +555,19 @@ sorcerer sorcerer (
 	.DL_ROM(ioctl_index == IOCTL_ROM),
 	.DL_QUICK(ioctl_index == IOCTL_QUICK),
 	.DL_PAC(ioctl_index == IOCTL_PAC),
-	.DL_TAPE(ioctl_index == IOCTL_TAPE),
+	.DL_DISKBOOT(ioctl_index == IOCTL_DISKBOOT),
+	.DL_CLEAR_BUSY(quick_clear_busy),
+	.DISKBOOT_READY(diskboot_ready),
+
+	.DISK_MOUNTED(disk_mounted),
+	.DISK_REQ(disk_req),
+	.DISK_ACK(disk_ack),
+	.DISK_WAIT(disk_wait),
+	.DISK_DRIVE(disk_drive),
+	.DISK_TRACK(disk_track),
+	.DISK_SECTOR(disk_sector),
+	.DISK_BUF_ADDR(disk_buf_addr),
+	.DISK_BUF_DOUT(disk_buf_dout),
 
 	.UNL_PAC(status[1]),
 	.LED(ledb)
