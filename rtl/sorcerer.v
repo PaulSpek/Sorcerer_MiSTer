@@ -53,6 +53,7 @@ module sorcerer (
 
 	// DMA bus
 	input         DL,
+	input         DL_WAIT,
 	input         DL_CLK,
 	input  [15:0] DL_ADDR,
 	input   [7:0] DL_DATA,
@@ -60,8 +61,20 @@ module sorcerer (
 	input         DL_ROM,
 	input         DL_QUICK,
 	input         DL_PAC,
-	input         DL_TAPE,
+	input         DL_DISKBOOT,
+	output        DL_CLEAR_BUSY,
+	output        DISKBOOT_READY,
 	input         UNL_PAC,
+
+	input   [1:0] DISK_MOUNTED,
+	output reg    DISK_REQ,
+	input         DISK_ACK,
+	output        DISK_WAIT,
+	output        DISK_DRIVE,
+	output  [6:0] DISK_TRACK,
+	output  [3:0] DISK_SECTOR,
+	output  [8:0] DISK_BUF_ADDR,
+	input   [7:0] DISK_BUF_DOUT,
 
 	output        LED
 );
@@ -133,10 +146,16 @@ always @(posedge CLK12) begin
 end
 
 wire [11:0] tb = acpu ? cpu_addr[11:0] : {dl[10], vcnt[7:3], hcnt[7:2]};
+wire        quick_dl = DL_QUICK & DL;
+wire        quick_mem_active;
 reg   [7:0] vram[2048];
 reg   [7:0] vram_dout;
 reg  [10:3] dl_r;
 wire [10:0] dl = acpu ? tb[9:0] : {dl_r, vcnt[2:0]};
+reg   [7:0] quick_wr;
+reg  [15:0] quick_addr;
+reg   [7:0] quick_data;
+wire        quick_vram_wr = quick_mem_active & (|quick_wr) & (quick_addr[15:11] == 5'b11110);
 
 // VRAM test pattern
 initial begin
@@ -154,7 +173,8 @@ reg  [7:0] char_shift; // 8d
 
 always @(posedge CLK12) begin
 	vram_dout <= vram[tb[10:0]];
-	if ((!cs1 | !cs2) & !write_n) vram[tb[10:0]] <= cpu_dout;
+	if (quick_vram_wr) vram[quick_addr[10:0]] <= quick_data;
+	else if ((!cs1 | !cs2) & !write_n) vram[tb[10:0]] <= cpu_dout;
 	charrom_q <= charrom[dl[9:0]];
 	charram_q <= charram[dl[9:0]];
 	if (!cs4 & !write_n) charram[dl[9:0]] <= cpu_dout;
@@ -180,12 +200,15 @@ wire        rd_n;
 wire        wr_n;
 wire        m1_n;
 wire        busak_n;
+wire [211:0] cpu_reg;
+reg  [211:0] cpu_dir;
+reg          cpu_dirset;
 
 T80s T80 (
 	.RESET_n(~RESET),
 	.CLK(CLK12),
 	.CEN(TURBO ? cen4 : cen2),
-	.WAIT_n(~DL),
+	.WAIT_n(~(DL_WAIT | DISK_WAIT)),
 	.INT_n(int_n),
 	.NMI_n(nmi_n),
 	.BUSRQ_n(1'b1),
@@ -198,7 +221,10 @@ T80s T80 (
 	.WR_n(wr_n),
 	.A(cpu_addr),
 	.DI(cpu_din),
-	.DO(cpu_dout)
+	.DO(cpu_dout),
+	.REG(cpu_reg),
+	.DIRSet(cpu_dirset),
+	.DIR(cpu_dir)
 );
 
 wire        inta_n = m1_n | iorq_n;
@@ -209,12 +235,24 @@ localparam [15:0] RAM_TOP_EXCLUSIVE = 16'hBC00;
 
 reg   [7:0] rom[4096];
 reg   [7:0] rom_dout;
+reg   [7:0] diskboot[1024];
+reg   [7:0] diskboot_dout;
+reg         diskboot_loaded = 0;
+integer     diskboot_init_idx;
+
+assign      DISKBOOT_READY = diskboot_loaded;
+
+initial begin
+	for (diskboot_init_idx = 0; diskboot_init_idx < 1024; diskboot_init_idx = diskboot_init_idx + 1)
+		diskboot[diskboot_init_idx] = 8'hFF;
+end
 
 reg   [7:0] pac[8192];
 reg   [7:0] pac_dout;
 
 always @(posedge CLK12) begin : ROM
 	rom_dout <= rom[cpu_addr[11:0]];
+	diskboot_dout <= diskboot[cpu_addr[9:0]];
 	pac_dout <= pac[cpu_addr[12:0]];
 	rom_2b_q <= rom_2b[{~acpu, tb[11:10], rd_n, wr_n}];
 end
@@ -229,6 +267,10 @@ wire        xwr = rom_2b_q[7];
 
 always @(posedge DL_CLK) begin : ROM_DL
 	if (DL_WE & DL_ROM & DL_ADDR[15:12] == 0) rom[DL_ADDR[11:0]] <= DL_DATA;
+	if (DL_WE & DL_DISKBOOT & DL_ADDR[15:10] == 0) begin
+		diskboot[DL_ADDR[9:0]] <= DL_DATA;
+		if (DL_ADDR[9:0] == 10'd255) diskboot_loaded <= 1;
+	end
 end
 
 reg         pac_loaded = 0;
@@ -251,6 +293,7 @@ always @(posedge CLK12) begin
 end
 
 wire        romcs = romen | (up8k & ~cpu_addr[12]) /* synthesis keep */;
+wire        diskbootsel = rfsh_n & ~mreq_n & (cpu_addr[15:10] == 6'b101111) & (cpu_addr[15:2] != 14'b10111110000000) & diskboot_loaded;
 wire        ramsel = ((RAM_SIZE == 0) & ~|cpu_addr[14:13]) |
                      ((RAM_SIZE == 1) & ~cpu_addr[14]) |
                      ((RAM_SIZE == 2) & ~cpu_addr[15]) |
@@ -259,34 +302,360 @@ wire        ramen = rfsh_n & ~mreq_n & ramsel & ~romen /* synthesis keep */;
 wire        pacsel = rfsh_n & ~mreq_n & cpu_addr[15:13] == 3'b110 & pac_loaded;
 
 wire        ioen = ~iorq_n & &cpu_addr[7:2];
+wire        fdc_sel = ~iorq_n & (cpu_addr[7:2] == 6'b001010); // 28-2B
+wire        fdc_ctrl_sel = ~iorq_n & (cpu_addr[7:2] == 6'b001011); // 2C-2F
+reg   [7:0] fdc_track = 0;
+reg   [7:0] fdc_sector = 1;
+reg   [7:0] fdc_data = 0;
+reg   [7:0] fdc_ctrl = 0;
+reg   [8:0] fdc_pos = 0;
+reg         fdc_busy = 0;
+reg         fdc_drq = 0;
+reg         fdc_not_found = 0;
+reg         fdc_read_pending = 0;
+reg   [7:0] micro_status = 8'h08;
+reg   [3:0] micro_sector = 4'h0;
+reg   [3:0] micro_status_sector = 4'h0;
+reg   [8:0] micro_pos = 9'h000;
+reg         micro_pending = 0;
+reg         micro_ready = 0;
+reg         micro_inv = 0;
+reg         micro_data_armed = 0;
+reg         micro_status_wait_done = 0;
+reg         micro_status_wait_active = 0;
+reg   [7:0] micro_status0_latch = 8'h00;
+reg         disk_drive = 0;
+reg   [6:0] disk_track = 0;
+reg   [3:0] disk_sector = 0;
+reg         disk_req_drive = 0;
+reg   [6:0] disk_req_track = 0;
+reg   [3:0] disk_req_sector = 0;
+reg         disk_ack_meta = 0;
+reg         disk_ack_sync = 0;
+reg         disk_ack_last = 0;
+wire        fdc_drive = fdc_ctrl[3] ? 1'b1 : 1'b0;
+wire        fdc_drive_selected = fdc_ctrl[2] | fdc_ctrl[3];
+wire        fdc_ready = fdc_drive_selected & DISK_MOUNTED[fdc_drive];
+wire  [7:0] fdc_status_read = {~fdc_ready, 1'b0, 1'b0, fdc_not_found, 2'b00, fdc_drq, fdc_busy};
+wire        microsel = rfsh_n & ~mreq_n & (cpu_addr[15:2] == 14'b10111110000000); // BE00-BE03
+wire        micro_data_port_read = microsel & ~rd_n & cpu_addr[1] & micro_ready;
+wire        micro_data_wait = 1'b0;
+wire        micro_data_read = micro_data_port_read;
+wire        disk_req_active = micro_pending | fdc_read_pending;
+wire        disk_wait_drive = disk_req_active ? disk_req_drive : disk_drive;
+wire        micro_status_wait = micro_status_wait_active &
+                                DISK_MOUNTED[disk_wait_drive] & !micro_status_wait_done;
+assign      DISK_DRIVE = disk_req_active ? disk_req_drive : disk_drive;
+assign      DISK_TRACK = disk_req_active ? disk_req_track : disk_track;
+assign      DISK_SECTOR = disk_req_active ? disk_req_sector : disk_sector;
+assign      DISK_BUF_ADDR = microsel ? micro_pos : fdc_pos;
+assign      DISK_WAIT = micro_pending | fdc_read_pending |
+                        micro_status_wait |
+                        micro_data_wait;
+
 wire  [7:0] io_in = ~rd_n & 
-            (cpu_addr[1:0] == 2'b10 ? {2'b11, vcnt[8], kbd_in} : 
+            (fdc_sel ? (cpu_addr[1:0] == 2'b00 ? fdc_status_read :
+                        cpu_addr[1:0] == 2'b01 ? fdc_track :
+                        cpu_addr[1:0] == 2'b10 ? fdc_sector :
+                        (fdc_drq ? DISK_BUF_DOUT : fdc_data)) :
+            cpu_addr[1:0] == 2'b10 ? {2'b11, vcnt[8], kbd_in} :
             uart_data_sel ? (tape_emu_ready ? tape_emu_dout : uart_dout) :
             uart_ctrl_sel ? (tape_emu_ready ? 8'h02 : uart_status) :
             8'hff);
+wire  [3:0] micro_next_sector = micro_sector + 4'd3 + {3'b000, micro_inv};
+wire  [3:0] micro_raw_sector = micro_next_sector;
+wire        micro_status_read = microsel & ~rd_n & (cpu_addr[1:0] == 2'b00);
+wire  [3:0] micro_status_out = micro_status_sector;
+wire  [6:0] micro_step_track = cpu_dout[0] ? ((disk_track != 7'd76) ? (disk_track + 1'd1) : disk_track) :
+                                             ((disk_track != 7'd0)  ? (disk_track - 1'd1) : disk_track);
+wire  [7:0] micro_step_status = 8'hA0 | ((micro_step_track == 7'd0) ? 8'h08 : 8'h00);
+wire  [7:0] micro_status0_next = (micro_status & 8'h80) | {4'h0, micro_next_sector};
+wire  [7:0] micro_status1_base = micro_status | ((disk_track == 7'd0) ? 8'h08 : 8'h00);
+wire  [7:0] micro_status1_value = micro_status1_base | {7'b0000000, disk_drive};
+wire  [7:0] micro_status0_value = micro_status_wait_active ? micro_status0_latch :
+                                  ((micro_status & 8'h80) | {4'h0, micro_status_out});
+wire  [7:0] micro_in = cpu_addr[1] ? (micro_ready ? DISK_BUF_DOUT : 8'h00) :
+                       cpu_addr[0] ? micro_status1_value :
+                       micro_status0_value;
+
+always @(posedge CLK12) begin
+	reg fdc_rd_data;
+	reg fdc_rd_data_d;
+	reg fdc_wr;
+	reg fdc_wr_d;
+	reg fdc_ctrl_wr;
+	reg fdc_ctrl_wr_d;
+	reg micro_rd;
+	reg micro_rd_d;
+	reg micro_wr;
+	reg micro_wr_d;
+
+	disk_ack_meta <= DISK_ACK;
+	disk_ack_sync <= disk_ack_meta;
+	disk_ack_last <= disk_ack_sync;
+
+	fdc_rd_data <= fdc_sel & ~rd_n & (cpu_addr[1:0] == 2'b11);
+	fdc_rd_data_d <= fdc_rd_data;
+	fdc_wr <= fdc_sel & ~wr_n;
+	fdc_wr_d <= fdc_wr;
+	fdc_ctrl_wr <= fdc_ctrl_sel & ~wr_n;
+	fdc_ctrl_wr_d <= fdc_ctrl_wr;
+	micro_rd <= microsel & ~rd_n;
+	micro_rd_d <= micro_rd;
+	micro_wr <= microsel & ~wr_n;
+	micro_wr_d <= micro_wr;
+
+	if (RESET) begin
+		fdc_track <= 0;
+		fdc_sector <= 1;
+		fdc_data <= 0;
+		fdc_ctrl <= 0;
+		fdc_pos <= 0;
+		fdc_busy <= 0;
+		fdc_drq <= 0;
+		fdc_not_found <= 0;
+		fdc_read_pending <= 0;
+		micro_status <= 8'h08;
+		micro_sector <= 0;
+		micro_status_sector <= 0;
+		micro_pos <= 0;
+		micro_pending <= 0;
+		micro_ready <= 0;
+		micro_inv <= 0;
+		micro_data_armed <= 0;
+		micro_status_wait_done <= 0;
+		micro_status_wait_active <= 0;
+		micro_status0_latch <= 0;
+		disk_drive <= 0;
+		disk_track <= 0;
+		disk_sector <= 0;
+		disk_req_drive <= 0;
+		disk_req_track <= 0;
+		disk_req_sector <= 0;
+		DISK_REQ <= 0;
+	end else begin
+		if (micro_data_read && !micro_data_armed) begin
+			micro_data_armed <= 1;
+		end
+		if (micro_data_armed && !micro_data_read) begin
+			micro_data_armed <= 0;
+			if (micro_pos != 9'd269) begin
+				micro_pos <= micro_pos + 1'd1;
+			end else begin
+				micro_ready <= 0;
+			end
+		end
+
+		if ((disk_ack_sync ^ disk_ack_last) & fdc_read_pending) begin
+			fdc_pos <= 0;
+			fdc_busy <= 1;
+			fdc_drq <= 1;
+			fdc_not_found <= 0;
+			fdc_read_pending <= 0;
+		end
+		if ((disk_ack_sync ^ disk_ack_last) & micro_pending) begin
+			micro_pos <= 0;
+			micro_pending <= 0;
+			micro_ready <= 1;
+			micro_status_wait_done <= 1;
+			micro_status <= 8'hA0 | (disk_req_track == 0 ? 8'h08 : 8'h00);
+		end
+
+		if (!micro_status_read) begin
+			micro_status_wait_done <= 0;
+			micro_status_wait_active <= 0;
+		end
+
+		if (micro_rd & ~micro_rd_d) begin
+			case (cpu_addr[1:0])
+				2'b00: begin
+					micro_status0_latch <= micro_status0_next;
+					micro_status_wait_active <= 1;
+					micro_sector <= micro_next_sector;
+					micro_status_sector <= micro_next_sector;
+					micro_inv <= ~micro_inv;
+					micro_pos <= 0;
+					micro_ready <= 0;
+					fdc_sector <= {4'h0, micro_next_sector};
+					fdc_track <= {1'b0, disk_track};
+					if (DISK_MOUNTED[disk_drive]) begin
+						disk_sector <= micro_raw_sector;
+						disk_req_drive <= disk_drive;
+						disk_req_track <= disk_track;
+						disk_req_sector <= micro_raw_sector;
+						micro_pending <= 1;
+						DISK_REQ <= ~DISK_REQ;
+					end else begin
+						micro_status <= 8'h00 | (disk_track == 0 ? 8'h08 : 8'h00);
+					end
+				end
+				default: ;
+			endcase
+		end
+
+		if (micro_wr & ~micro_wr_d) begin
+			if (!cpu_addr[1]) begin
+				case (cpu_dout[7:5])
+					3'd1: begin
+						disk_drive <= cpu_dout[0];
+						micro_status <= 8'hA0 | (disk_track == 0 ? 8'h08 : 8'h00);
+					end
+					3'd3: begin
+						if (cpu_dout[0]) begin
+							if (disk_track != 7'd76) disk_track <= disk_track + 1'd1;
+						end else begin
+							if (disk_track != 0) disk_track <= disk_track - 1'd1;
+						end
+						micro_status <= micro_step_status;
+					end
+					3'd5: begin
+						// Command group 5 resets the sector phase and byte position.
+						// This matches the local DiskBoot/Micropolis simulator.
+						micro_sector <= 4'h0;
+						micro_status_sector <= 4'h0;
+						micro_pos <= 9'h000;
+						micro_status <= 8'hA0 | (disk_track == 0 ? 8'h08 : 8'h00);
+					end
+					default: begin
+						micro_status <= 8'hA0 | (disk_track == 0 ? 8'h08 : 8'h00);
+					end
+				endcase
+			end
+		end
+
+		if (fdc_rd_data & ~fdc_rd_data_d & fdc_drq) begin
+			if (fdc_pos == 9'd269) begin
+				fdc_pos <= 0;
+				fdc_busy <= 0;
+				fdc_drq <= 0;
+			end else begin
+				fdc_pos <= fdc_pos + 1'd1;
+			end
+		end
+
+		if (fdc_ctrl_wr & ~fdc_ctrl_wr_d) begin
+			fdc_ctrl <= cpu_dout;
+		end
+
+		if (fdc_wr & ~fdc_wr_d) begin
+			case (cpu_addr[1:0])
+				2'b00: begin
+					fdc_not_found <= 0;
+					casez (cpu_dout)
+						8'b0000_????: begin // restore
+							fdc_track <= 0;
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+							fdc_read_pending <= 0;
+						end
+
+						8'b0001_????: begin // seek
+							fdc_track <= fdc_data;
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+							fdc_read_pending <= 0;
+						end
+
+						8'b001?_????: begin // step
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+						end
+
+						8'b010?_????: begin // step in
+							if (fdc_track != 8'd76) fdc_track <= fdc_track + 1'd1;
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+						end
+
+						8'b011?_????: begin // step out
+							if (fdc_track != 0) fdc_track <= fdc_track - 1'd1;
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+						end
+
+						8'b100?_????: begin // read sector
+							fdc_pos <= 0;
+							fdc_drq <= 0;
+							if (fdc_ready && fdc_track < 8'd77 && fdc_sector >= 8'd1 && fdc_sector <= 8'd16) begin
+								disk_drive <= fdc_drive;
+								disk_track <= fdc_track[6:0];
+								disk_sector <= fdc_sector[3:0] - 1'd1;
+								disk_req_drive <= fdc_drive;
+								disk_req_track <= fdc_track[6:0];
+								disk_req_sector <= fdc_sector[3:0] - 1'd1;
+								fdc_busy <= 1;
+								fdc_read_pending <= 1;
+								DISK_REQ <= ~DISK_REQ;
+							end else begin
+								fdc_busy <= 0;
+								fdc_read_pending <= 0;
+								fdc_not_found <= 1;
+							end
+						end
+
+						8'b101?_????: begin // write sector is not implemented yet
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+							fdc_read_pending <= 0;
+							fdc_not_found <= 1;
+						end
+
+						8'b1101_????: begin // force interrupt
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+							fdc_read_pending <= 0;
+							fdc_not_found <= 0;
+						end
+
+						default: begin
+							fdc_busy <= 0;
+							fdc_drq <= 0;
+							fdc_read_pending <= 0;
+						end
+					endcase
+				end
+
+				2'b01: begin fdc_track <= cpu_dout; end
+				2'b10: begin fdc_sector <= cpu_dout; end
+				2'b11: begin fdc_data <= cpu_dout; end
+			endcase
+		end
+	end
+end
 
 assign      cpu_din = romcs ? rom_dout :
+                      diskbootsel ? diskboot_dout :
+                      microsel ? micro_in :
                       ramen ? RAM_DOUT :
                       pacsel ? pac_dout:
                       ((~cs1 | ~cs2) & ~db1e) ? vram_dout :
                       (~cs3 & ~db1e) ? charrom_q :
                       (~cs4 & ~db1e) ? charram_q :
-                      ioen ? io_in : 8'hff;
+                      (ioen | fdc_sel) ? io_in : 8'hff;
 
-wire        tape_dl = DL_TAPE & DL;
-wire        quick_dl = DL_QUICK & DL;
+wire        tape_dl = 1'b0;
 reg   [7:0] tape_wr;
 always @(posedge DL_CLK) begin
 	if (DL_WE) tape_wr <= 8'hFF;
 	else tape_wr <= {1'b0, tape_wr[7:1]};
 end
 
-reg   [7:0] quick_wr;
-reg  [15:0] quick_addr;
-reg   [7:0] quick_data;
 reg  [15:0] quick_exec;
+reg  [15:0] quick_pc;
+reg  [15:0] quick_end;
+reg  [15:0] quick_stub_addr;
 reg         quick_ready;
 reg         quick_error;
+reg         quick_autorun;
+reg         quick_basic;
+reg         quick_run;
+reg         quick_clear_busy;
+reg  [15:0] quick_clear_addr;
+reg   [3:0] quick_patch_idx;
+wire        quick_patch_busy = quick_ready & ~quick_error & (quick_patch_idx < 4'd15);
+
+assign quick_mem_active = quick_dl | quick_clear_busy | quick_patch_busy;
+assign DL_CLEAR_BUSY = quick_clear_busy | quick_patch_busy;
 
 always @(posedge DL_CLK) begin : quickload
 	localparam [2:0]
@@ -306,7 +675,9 @@ always @(posedge DL_CLK) begin : quickload
 	reg [15:0] end_addr;
 	reg [15:0] payload_left;
 	reg [15:0] payload_addr;
-
+	reg [15:0] final_end;
+	reg        is_basic_load;
+	reg        is_autorun_load;
 	quick_dl_d <= quick_dl;
 	quick_wr <= {1'b0, quick_wr[7:1]};
 
@@ -317,12 +688,32 @@ always @(posedge DL_CLK) begin : quickload
 		end_addr <= 0;
 		payload_left <= 0;
 		payload_addr <= 0;
+		quick_end <= 0;
+		quick_stub_addr <= 0;
 		quick_addr <= 0;
 		quick_data <= 0;
 		quick_exec <= 0;
+		quick_pc <= 0;
 		quick_ready <= 0;
 		quick_error <= 0;
+		quick_autorun <= 0;
+		quick_basic <= 0;
+		quick_run <= 0;
+		quick_clear_busy <= 0;
+		quick_clear_addr <= 0;
 		quick_wr <= 0;
+		quick_patch_idx <= 4'hF;
+	end else if (quick_clear_busy & quick_basic) begin
+		quick_clear_busy <= 0;
+	end else if (quick_clear_busy) begin
+		quick_addr <= quick_clear_addr;
+		quick_data <= 8'h00;
+		quick_wr <= 8'hFF;
+		if (quick_clear_addr == 16'hBB6F) begin
+			quick_clear_busy <= 0;
+		end else begin
+			quick_clear_addr <= quick_clear_addr + 1'd1;
+		end
 	end else if (quick_dl & DL_WE & ~quick_error) begin
 		case (state)
 			Q_HEADER: begin
@@ -365,11 +756,23 @@ always @(posedge DL_CLK) begin : quickload
 			Q_PAYLOAD: begin
 				if (payload_left == 0) begin
 					end_addr[15:8] <= DL_DATA;
-					if ({DL_DATA, end_addr[7:0]} < load_addr || load_addr[15:14] == 2'b11 || DL_DATA[7:6] == 2'b11) begin
+					final_end = {DL_DATA, end_addr[7:0]};
+					is_basic_load = (load_addr == 16'h01D5) || (quick_exec == 16'hC858);
+					is_autorun_load = (quick_exec >= load_addr) && (quick_exec <= final_end) && (quick_exec < RAM_TOP_EXCLUSIVE) && !is_basic_load;
+					if (final_end < load_addr || load_addr >= RAM_TOP_EXCLUSIVE || final_end >= RAM_TOP_EXCLUSIVE ||
+					    (is_basic_load && ((final_end + 16'd11) >= RAM_TOP_EXCLUSIVE))) begin
 						quick_error <= 1;
 					end else begin
 						payload_addr <= load_addr;
-						payload_left <= {DL_DATA, end_addr[7:0]} - load_addr + 1'd1;
+						payload_left <= final_end - load_addr + 1'd1;
+						quick_end <= final_end;
+						quick_stub_addr <= final_end + 16'd1;
+						quick_basic <= is_basic_load;
+						quick_autorun <= is_autorun_load;
+						if (!is_basic_load) begin
+							quick_clear_busy <= 1;
+							quick_clear_addr <= 0;
+						end
 					end
 				end else begin
 					quick_addr <= payload_addr;
@@ -378,18 +781,74 @@ always @(posedge DL_CLK) begin : quickload
 					payload_addr <= payload_addr + 1'd1;
 					payload_left <= payload_left - 1'd1;
 					quick_ready <= 1;
+					if (payload_left == 1) begin
+						if (quick_basic)
+							quick_patch_idx <= 0;
+						else if (quick_autorun) begin
+							quick_pc <= quick_exec;
+							quick_run <= 1;
+						end
+					end
 				end
 			end
 
 			default: ;
 		endcase
+	end else if (quick_patch_busy) begin
+		case (quick_patch_idx)
+			4'd0:  begin quick_addr <= quick_stub_addr + 16'd0;  quick_data <= 8'hCD; end // CALL C426
+			4'd1:  begin quick_addr <= quick_stub_addr + 16'd1;  quick_data <= 8'h26; end
+			4'd2:  begin quick_addr <= quick_stub_addr + 16'd2;  quick_data <= 8'hC4; end
+			4'd3:  begin quick_addr <= quick_stub_addr + 16'd3;  quick_data <= 8'h21; end // LD HL,01D4
+			4'd4:  begin quick_addr <= quick_stub_addr + 16'd4;  quick_data <= 8'hD4; end
+			4'd5:  begin quick_addr <= quick_stub_addr + 16'd5;  quick_data <= 8'h01; end
+			4'd6:  begin quick_addr <= quick_stub_addr + 16'd6;  quick_data <= 8'h36; end // LD (HL),00
+			4'd7:  begin quick_addr <= quick_stub_addr + 16'd7;  quick_data <= 8'h00; end
+			4'd8:  begin quick_addr <= quick_stub_addr + 16'd8;  quick_data <= 8'hC3; end // JP C3DD
+			4'd9:  begin quick_addr <= quick_stub_addr + 16'd9;  quick_data <= 8'hDD; end
+			4'd10: begin quick_addr <= quick_stub_addr + 16'd10; quick_data <= 8'hC3; end
+			4'd11: begin quick_addr <= 16'h01B7; quick_data <= quick_end[7:0]; end
+			4'd12: begin quick_addr <= 16'h01B8; quick_data <= quick_end[15:8]; end
+			4'd13: begin quick_addr <= 16'h01D4; quick_data <= 8'h00; end
+			default: ;
+		endcase
+		if (quick_patch_idx < 4'd14)
+		quick_wr <= 8'hFF;
+		quick_patch_idx <= quick_patch_idx + 1'd1;
+		if (quick_patch_idx == 4'd14) begin
+			quick_pc <= quick_stub_addr;
+			quick_run <= 1;
+		end
+	end else if (~quick_dl) begin
+		quick_clear_busy <= 0;
 	end
 end
 
-assign      RAM_ADDR = quick_dl ? {1'b0, quick_addr} : tape_dl ? {1'b1, DL_ADDR[15:0]} : rfsh_n ? {1'b0, cpu_addr[15:0]} : {1'b1, tape_emu_addr};
-assign      RAM_RD = (quick_dl | tape_dl) ? 1'b0 : !rfsh_n | (ramen & ~rd_n);
-assign      RAM_WR = quick_dl ? |quick_wr : tape_dl ? |tape_wr : ramen & ~wr_n;
-assign      RAM_DIN = quick_dl ? quick_data : tape_dl ? DL_DATA : cpu_dout;
+always @(posedge CLK12) begin
+	reg quick_run_meta;
+	reg quick_run_sync;
+	reg quick_run_d;
+
+	quick_run_meta <= quick_run;
+	quick_run_sync <= quick_run_meta;
+	quick_run_d <= quick_run_sync;
+	cpu_dirset <= 0;
+
+	if (quick_run_sync & ~quick_run_d) begin
+		cpu_dir <= cpu_reg;
+		cpu_dir[79:64] <= quick_pc;
+		cpu_dirset <= 1;
+	end
+end
+
+wire        quick_ram_wr = quick_mem_active & (|quick_wr) & (quick_addr < RAM_TOP_EXCLUSIVE);
+
+assign      RAM_ADDR = quick_mem_active ? {1'b0, quick_addr} :
+                       tape_dl ? {1'b1, DL_ADDR[15:0]} :
+                       rfsh_n ? {1'b0, cpu_addr[15:0]} : {1'b1, tape_emu_addr};
+assign      RAM_RD = (quick_mem_active | tape_dl) ? 1'b0 : !rfsh_n | (ramen & ~rd_n);
+assign      RAM_WR = quick_mem_active ? quick_ram_wr : tape_dl ? |tape_wr : ramen & ~wr_n;
+assign      RAM_DIN = quick_mem_active ? quick_data : tape_dl ? DL_DATA : cpu_dout;
 
 reg   [3:0] kbd_out;
 reg         rs232_sel;
@@ -636,6 +1095,6 @@ always @(posedge DL_CLK) begin : tape_emu
 	end
 end
 
-assign LED = DL | tape_emu_ready | quick_ready;
+assign LED = DL | tape_emu_ready | quick_ready | diskboot_loaded | |DISK_MOUNTED | fdc_busy | fdc_drq;
 
 endmodule
