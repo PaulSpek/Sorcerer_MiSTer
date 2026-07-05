@@ -225,7 +225,7 @@ localparam CONF_STR = {
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	"v,2;", // [optional] config version 0-99. 
+	"v,2;", // [optional] config version 0-99.
 	        // If CONF_STR options are changed in incompatible way, then change version number too,
 			  // so all options will get default values on first start.
 	"V,v",`BUILD_DATE 
