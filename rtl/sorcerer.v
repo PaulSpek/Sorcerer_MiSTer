@@ -205,6 +205,7 @@ wire        inta_n = m1_n | iorq_n;
 wire        up8k = &{cpu_addr[15:13], rfsh_n};
 wire        acpu = &{up8k, cpu_addr[12], ~mreq_n} /* synthesis keep */;
 wire        write_n = acpu ? xwr : 1'b1;
+localparam [15:0] RAM_TOP_EXCLUSIVE = 16'hBC00;
 
 reg   [7:0] rom[4096];
 reg   [7:0] rom_dout;
@@ -253,7 +254,7 @@ wire        romcs = romen | (up8k & ~cpu_addr[12]) /* synthesis keep */;
 wire        ramsel = ((RAM_SIZE == 0) & ~|cpu_addr[14:13]) |
                      ((RAM_SIZE == 1) & ~cpu_addr[14]) |
                      ((RAM_SIZE == 2) & ~cpu_addr[15]) |
-                     ((RAM_SIZE == 3) & (cpu_addr[15:14] != 2'b11));
+                     ((RAM_SIZE == 3) & (cpu_addr < RAM_TOP_EXCLUSIVE));
 wire        ramen = rfsh_n & ~mreq_n & ramsel & ~romen /* synthesis keep */;
 wire        pacsel = rfsh_n & ~mreq_n & cpu_addr[15:13] == 3'b110 & pac_loaded;
 
