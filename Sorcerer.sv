@@ -210,7 +210,7 @@ localparam CONF_STR = {
 	"Sorcerer;;",
 	"-;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-	"O[2],TV Mode,NTSC,PAL;",
+	"O[2],TV Mode,PAL,NTSC;",
 	"O[4:3],Noise,White,Red,Green,Blue;",
 	"-;",
 	"F1,BIN;",
@@ -225,7 +225,7 @@ localparam CONF_STR = {
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	"v,0;", // [optional] config version 0-99. 
+	"v,2;", // [optional] config version 0-99. 
 	        // If CONF_STR options are changed in incompatible way, then change version number too,
 			  // so all options will get default values on first start.
 	"V,v",`BUILD_DATE 
@@ -375,9 +375,9 @@ sorcerer sorcerer (
 	.CASS_IN(cass_in[1]),
 	.CASS_OUT(cass_out),
 	.CASS_CTRL(cass_motor),
-	.PAL(1'b1),
+	.PAL(~status[2]),
 	.ALTTIMINGS(1'b1),
-	.TURBO(1'b1),
+	.TURBO(1'b0),
 
 	.KEY_STROBE(key_strobe),
 	.KEY_PRESSED(key_pressed),
