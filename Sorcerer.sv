@@ -189,10 +189,12 @@ assign VGA_DISABLE = 0;
 assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 
+wire [13:0] audio;
+
 assign AUDIO_S = 0;
-assign AUDIO_L = 0;
-assign AUDIO_R = 0;
-assign AUDIO_MIX = 0;
+assign AUDIO_L = {audio, 2'b00};
+assign AUDIO_R = {audio, 2'b00};
+assign AUDIO_MIX = 2'b11;
 
 assign LED_DISK = 0;
 assign LED_POWER = 0;

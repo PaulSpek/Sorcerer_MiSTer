@@ -380,6 +380,11 @@ always @(posedge CLK12) begin
 	if (RESET)
 		kbd_out <= 0;
 	else if (ioen & ~wr_n & cpu_addr[1:0] == 2'b10) {rs232_sel, baud_sel, motor_ctrl, kbd_out} <= cpu_dout;
+
+	if (RESET)
+		AUDIO <= 14'h2000;
+	else if (ioen & ~wr_n & cpu_addr[1:0] == 2'b11)
+		AUDIO <= {cpu_dout, 6'b000000};
 end
 
 assign CASS_CTRL = motor_ctrl[0];
