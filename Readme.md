@@ -14,12 +14,15 @@ The OSD `TV Mode` option selects PAL or NTSC timing. PAL is the default.
 
 ### Software Loading
 
-The OSD exposes two BIN loaders:
+The OSD exposes these software loading options:
 
 - `Load BIN` loads MAME-style Sorcerer software `.bin` files.
+- `Load WAV` loads cassette WAV files by replaying decoded tape bytes through the Sorcerer UART.
 - `Load PAC` loads cartridge/PAC ROM images.
 
 BASIC .bin programs need a BASIC PAC loaded first.
+
+For WAV loading, use the normal Sorcerer tape commands first, then select `Load WAV` from the OSD. Use `LOG` for monitor/machine-code tapes and `CLOAD` from BASIC for BASIC tapes. The loader auto-detects 300 and 1200 baud where possible. Some marginal 300 baud recordings may still fail to decode.
 
 ### CP/M Disk Boot
 
@@ -41,5 +44,5 @@ The core drives mono audio to both left and right MiSTer audio channels.
 
 ### Tape Loading
 
-UART/tape loading still needs more testing. WAV cassette loading is not part of the current core and is tracked as future work.
+The cassette input path is wired through the Sorcerer UART for OSD WAV loading.
 
