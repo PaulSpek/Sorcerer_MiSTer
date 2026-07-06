@@ -65,6 +65,9 @@ module sorcerer (
 	output        DL_CLEAR_BUSY,
 	output        DISKBOOT_READY,
 	input         UNL_PAC,
+	input         EXT_UART_RX_ACTIVE,
+	input         EXT_UART_RX_BIT,
+	input         EXT_UART_HIGH_BAUD,
 
 	input   [1:0] DISK_MOUNTED,
 	output reg    DISK_REQ,
@@ -861,6 +864,9 @@ wire        uart_data_sel = ioen & cpu_addr[1:0] == 2'b00;
 wire        uart_ctrl_sel = ioen & cpu_addr[1:0] == 2'b01;
 reg         cen_4800, cen_19200, cen_38400;
 reg         uart_rx_cen, uart_tx_cen;
+reg         ext_uart_active_meta, ext_uart_active_sync;
+reg         ext_uart_bit_meta, ext_uart_bit_sync;
+reg         ext_uart_baud_meta, ext_uart_baud_sync;
 
 reg   [5:0] div55_cnt;
 reg   [2:0] div8_cnt;
@@ -881,8 +887,17 @@ always @(posedge CLK12) begin
 
 end
 
+always @(posedge CLK12) begin
+	ext_uart_active_meta <= EXT_UART_RX_ACTIVE;
+	ext_uart_active_sync <= ext_uart_active_meta;
+	ext_uart_bit_meta <= EXT_UART_RX_BIT;
+	ext_uart_bit_sync <= ext_uart_bit_meta;
+	ext_uart_baud_meta <= EXT_UART_HIGH_BAUD;
+	ext_uart_baud_sync <= ext_uart_baud_meta;
+end
+
 always @(*) begin
-	case ({rs232_sel, baud_sel})
+	case (ext_uart_active_sync ? {1'b0, ext_uart_baud_sync} : {rs232_sel, baud_sel})
 		3: uart_rx_cen = cen_19200;
 		2: uart_rx_cen = cen_4800;
 		1: uart_rx_cen = cen_19200; // casette read clock (1200 baud) - emulate PLL? - UART syncs to byte start anyway
@@ -942,7 +957,7 @@ gen_uart_ay_31015 uart (
 	.nb(cpu_dout[1:0]),  // word length
 	.eps(cpu_dout[3]), // even parity select
 	// uart pins
-	.rx(rs232_sel ? UART_RX : decoder[2]),
+	.rx(rs232_sel ? UART_RX : (ext_uart_active_sync ? ext_uart_bit_sync : decoder[2])),
 	.tx(UART_TX)
 );
 
