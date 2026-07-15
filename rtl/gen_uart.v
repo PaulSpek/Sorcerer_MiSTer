@@ -269,7 +269,6 @@ module gen_uart_mc_6850(
 );
 
 reg        sreset;
-wire [7:0] status = {~irq_n, rx_pe, rx_ovr, rx_fe, cts_n, dcd_n, ~tdr_full, rx_full};
 
 reg        wordlen;
 reg        parity_en;
@@ -289,6 +288,7 @@ reg        tx_start;
 wire       tx_busy;
 reg        tdr_full;
 reg  [1:0] tx_ctrl;
+wire [7:0] status = {~irq_n, rx_pe, rx_ovr, rx_fe, cts_n, dcd_n, ~tdr_full, rx_full};
 
 assign rts_n = tx_ctrl == 2;
 
