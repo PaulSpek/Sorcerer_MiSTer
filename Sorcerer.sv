@@ -208,21 +208,27 @@ assign VIDEO_ARY = (!ar) ? 12'd3 : 12'd0;
 `include "build_id.v" 
 localparam CONF_STR = {
 	"Sorcerer;;",
-	"-;",
-	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-	"O[2],TV Mode,PAL,NTSC;",
-	"O[4:3],Noise,White,Red,Green,Blue;",
+	"P1,Hardware;",
+	"P1O[6:5],FDC,DreamDisk,Micropolis,None;",
+	"P1O[8:7],Memory,56K,48K,32K;",
+	"P2,Video;",
+	"P2O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+	"P2O[2],TV Mode,PAL,NTSC;",
+	"P2O[4:3],Noise,White,Red,Green,Blue;",
 	"-;",
 	"F1,BIN,Load BIN;",
 	"F2,WAV,Load WAV;",
 	"F3,BIN,Load PAC;",
-	"F4,DAT,Load DiskBoot;",
+	"D4F4,DAT,Load DiskBoot;",
+	"F5,ROM,Load Monitor;",
 	"D0S0,DSK,Mount disk A;",
 	"D0S1,DSK,Mount disk B;",
+	"D1S2,DSK,Mount disk C;",
+	"D1S3,DSK,Mount disk D;",
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	"v,4;", // [optional] config version 0-99.
+	"v,14;", // [optional] config version 0-99.
 	        // If CONF_STR options are changed in incompatible way, then change version number too,
 			  // so all options will get default values on first start.
 	"V,v",`BUILD_DATE 
@@ -238,17 +244,17 @@ wire ioctl_wait;
 wire quick_clear_busy;
 wire diskboot_ready;
 
-wire [1:0] img_mounted;
+wire [3:0] img_mounted;
 wire       img_readonly;
 wire [63:0] img_size;
-wire [31:0] sd_lba[2];
-wire [5:0]  sd_blk_cnt[2];
-wire [1:0]  sd_rd;
-wire [1:0]  sd_wr;
-wire [1:0]  sd_ack;
+wire [31:0] sd_lba[4];
+wire [5:0]  sd_blk_cnt[4];
+wire [3:0]  sd_rd;
+wire [3:0]  sd_wr;
+wire [3:0]  sd_ack;
 wire [13:0] sd_buff_addr;
 wire [7:0]  sd_buff_dout;
-wire [7:0]  sd_buff_din[2];
+wire [7:0]  sd_buff_din[4];
 wire        sd_buff_wr;
 
 localparam [15:0] IOCTL_ROM      = 16'd0;
@@ -256,16 +262,27 @@ localparam [15:0] IOCTL_QUICK    = 16'd1;
 localparam [15:0] IOCTL_WAV      = 16'd2;
 localparam [15:0] IOCTL_PAC      = 16'd3;
 localparam [15:0] IOCTL_DISKBOOT = 16'd4;
+localparam [15:0] IOCTL_MONITOR  = 16'd5;
 
 wire [21:0] gamma_bus;
 wire forced_scandoubler;
 wire   [1:0] buttons;
 wire [127:0] status;
 wire  [10:0] ps2_key;
+wire  [1:0] fdc_mode = status[6:5];
+wire        fdc_dreamdisk = fdc_mode == 2'd0;
+wire        fdc_micropolis = fdc_mode == 2'd1;
+wire        fdc_none = fdc_mode == 2'd2;
+wire  [1:0] memory_mode = status[8:7];
+wire [15:0] ram_top_exclusive = memory_mode == 2'd1 ? 16'hC000 :
+                                memory_mode == 2'd2 ? 16'h8000 : 16'hE000;
+wire [15:0] status_menumask = (fdc_none       ? 16'h0001 : 16'h0000) |
+                              (~fdc_dreamdisk ? 16'h0002 : 16'h0000) |
+                              (~fdc_micropolis ? 16'h0010 : 16'h0000);
 
 assign ioctl_wait = ioctl_download && (ioctl_index == IOCTL_QUICK) && quick_clear_busy;
 
-hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .VDNUM(4)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -276,7 +293,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({14'd0, 1'b1, ~diskboot_ready}),
+	.status_menumask(status_menumask),
 	
 	.ps2_key(ps2_key),
 
@@ -380,7 +397,7 @@ always @(posedge clk_sys) begin
 
     if (ioctl_downlD & ~ioctl_download) begin
         rom_loaded <= 1;
-        if (ioctl_index == IOCTL_PAC) pac_reset_cnt <= 4'hF;
+        if (ioctl_index == IOCTL_PAC || ioctl_index == IOCTL_MONITOR) pac_reset_cnt <= 4'hF;
     end else if (pac_reset_cnt) begin
         pac_reset_cnt <= pac_reset_cnt - 1'd1;
     end
@@ -391,78 +408,104 @@ wire        ram_rd, ram_wr;
 wire  [7:0] ram_dout, ram_din;
 
 wire        disk_req;
+wire        disk_write;
+wire        disk_write_commit;
 wire        disk_ack;
 wire        disk_wait;
-wire        disk_drive;
+wire  [1:0] disk_drive;
+wire        disk_side;
 wire  [6:0] disk_track;
 wire  [3:0] disk_sector;
-wire  [8:0] disk_buf_addr;
+wire        disk_sector_1024;
+wire  [9:0] disk_buf_addr;
 wire  [7:0] disk_buf_dout;
-reg   [1:0] disk_mounted = 0;
-reg   [7:0] disk_buf[1024];
+wire        disk_buf_cpu_wr;
+wire  [7:0] disk_buf_cpu_din;
+reg   [3:0] disk_mounted = 0;
+reg   [7:0] disk_buf[2048];
 reg   [8:0] disk_base = 0;
 reg         disk_ack_tgl = 0;
 reg         disk_busy = 0;
 reg         disk_rd = 0;
 reg         disk_start = 0;
 reg   [1:0] disk_gap = 0;
+reg   [1:0] disk_last_block = 0;
 reg         disk_hps_ack_seen = 0;
 reg         disk_data_ready = 0;
-reg         disk_need_second_block = 0;
-reg         disk_second_block = 0;
-reg         disk_wait_ack_clear = 0;
 reg         disk_wait_idle = 0;
 reg         disk_req_meta = 0;
 reg         disk_req_sync = 0;
 reg         disk_req_last = 0;
 reg         disk_req_pending = 0;
-reg         disk_active_drive = 0;
+reg         disk_commit_meta = 0;
+reg         disk_commit_sync = 0;
+reg         disk_commit_last = 0;
+reg         disk_commit_pending = 0;
+reg         disk_writeback_busy = 0;
+reg         disk_writeback_start = 0;
+reg         disk_writeback_wait_idle = 0;
+reg         disk_wr = 0;
+reg   [1:0] disk_active_drive = 0;
 reg  [31:0] disk_offset = 0;
 reg  [31:0] disk_lba = 0;
-wire  [9:0] disk_buf_rd_addr = {1'b0, disk_base} + {1'b0, disk_buf_addr};
-wire  [9:0] disk_buf_end_addr = {1'b0, disk_base} + 10'd269;
-wire  [9:0] disk_buf_wr_addr = {disk_second_block, sd_buff_addr[8:0]};
-wire  [8:0] disk_target_addr = (disk_need_second_block && !disk_second_block) ? 9'h1FF : disk_buf_end_addr[8:0];
+wire  [3:0] core_disk_mounted = disk_mounted;
+wire  [1:0] disk_req_host_drive = disk_drive;
+wire [10:0] disk_buf_rd_addr = {2'b00, disk_base} + {1'b0, disk_buf_addr};
+wire [10:0] disk_buf_wr_addr = sd_buff_addr[10:0];
+wire [10:0] disk_buf_cpu_wr_addr = {2'b00, disk_base} + {1'b0, disk_buf_addr};
+wire  [5:0] disk_blk_cnt = {4'd0, disk_last_block};
+reg  [10:0] disk_end_addr = 0;
 
-assign sd_wr = 2'b00;
-assign sd_buff_din[0] = 8'hFF;
-assign sd_buff_din[1] = 8'hFF;
+assign sd_wr = disk_wr ? (4'b0001 << disk_active_drive) : 4'b0000;
+assign sd_buff_din[0] = disk_buf[sd_buff_addr[10:0]];
+assign sd_buff_din[1] = disk_buf[sd_buff_addr[10:0]];
+assign sd_buff_din[2] = disk_buf[sd_buff_addr[10:0]];
+assign sd_buff_din[3] = disk_buf[sd_buff_addr[10:0]];
 assign sd_lba[0] = disk_lba;
 assign sd_lba[1] = disk_lba;
-assign sd_blk_cnt[0] = 6'd0;
-assign sd_blk_cnt[1] = 6'd0;
-assign sd_rd = disk_rd ? (disk_active_drive ? 2'b10 : 2'b01) : 2'b00;
+assign sd_lba[2] = disk_lba;
+assign sd_lba[3] = disk_lba;
+assign sd_blk_cnt[0] = disk_blk_cnt;
+assign sd_blk_cnt[1] = disk_blk_cnt;
+assign sd_blk_cnt[2] = disk_blk_cnt;
+assign sd_blk_cnt[3] = disk_blk_cnt;
+assign sd_rd = disk_rd ? (4'b0001 << disk_active_drive) : 4'b0000;
 assign disk_ack = disk_ack_tgl;
 assign disk_buf_dout = disk_buf[disk_buf_rd_addr];
 
 always @(posedge clk_sys) begin
-	reg [17:0] sector_linear;
+	reg [18:0] sector_linear;
+	reg  [7:0] dream_track_side;
 	reg [31:0] sector_offset;
-	reg  [9:0] sector_end_addr;
+	reg [10:0] sector_end_addr;
 
 	disk_req_meta <= disk_req;
 	disk_req_sync <= disk_req_meta;
 	disk_req_last <= disk_req_sync;
+	disk_commit_meta <= disk_write_commit;
+	disk_commit_sync <= disk_commit_meta;
+	disk_commit_last <= disk_commit_sync;
 	if (disk_gap != 0) disk_gap <= disk_gap - 1'd1;
-	if (disk_req_sync ^ disk_req_last) disk_req_pending <= 1;
+	if (disk_req_sync ^ disk_req_last) begin
+		disk_req_pending <= 1;
+	end
+	if (disk_commit_sync ^ disk_commit_last) disk_commit_pending <= 1;
 
 	if (img_mounted[0]) disk_mounted[0] <= 1;
 	if (img_mounted[1]) disk_mounted[1] <= 1;
+	if (img_mounted[2]) disk_mounted[2] <= 1;
+	if (img_mounted[3]) disk_mounted[3] <= 1;
 
-	if (sd_buff_wr) begin
+	if (disk_busy && sd_ack[disk_active_drive] && sd_buff_wr) begin
 		disk_buf[disk_buf_wr_addr] <= sd_buff_dout;
-		if (disk_busy && (sd_buff_addr[8:0] == disk_target_addr))
+		if (sd_buff_addr[10:0] == disk_end_addr)
 			disk_data_ready <= 1;
 	end
+	if (disk_buf_cpu_wr) disk_buf[disk_buf_cpu_wr_addr] <= disk_buf_cpu_din;
 
 	if (disk_start) begin
 		disk_start <= 0;
 		disk_rd <= 1;
-	end
-
-	if (disk_wait_ack_clear && !sd_ack[disk_active_drive]) begin
-		disk_wait_ack_clear <= 0;
-		disk_start <= 1;
 	end
 
 	if (disk_wait_idle && !sd_ack[disk_active_drive]) begin
@@ -470,18 +513,27 @@ always @(posedge clk_sys) begin
 		disk_gap <= 2'd3;
 	end
 
-	if (~disk_busy && ~disk_start && !disk_wait_idle && (disk_gap == 0) && disk_req_pending && !sd_ack[disk_drive]) begin
+	if (~disk_busy && ~disk_start && !disk_wait_idle && (disk_gap == 0) && disk_req_pending && !sd_ack[disk_req_host_drive]) begin
 		disk_req_pending <= 0;
-		disk_active_drive <= disk_drive;
-		sector_linear = ({11'd0, disk_track} << 4) + {14'd0, disk_sector};
-		sector_offset = sector_linear * 18'd270;
-		sector_end_addr = {1'b0, sector_offset[8:0]} + 10'd269;
+		disk_active_drive <= disk_req_host_drive;
+		if (disk_sector_1024) begin
+			dream_track_side = {disk_track, 1'b0} + {7'd0, disk_side};
+			sector_offset = 32'h00000200 +
+			                ({24'd0, dream_track_side} << 12) +
+			                ({24'd0, dream_track_side} << 10) +
+			                ({24'd0, dream_track_side} << 8) +
+			                (({28'd0, disk_sector} - 32'd1) << 10);
+			sector_end_addr = {2'b00, sector_offset[8:0]} + 11'd1023;
+		end else begin
+			sector_linear = ({12'd0, disk_track} << 4) + {15'd0, disk_sector};
+			sector_offset = sector_linear * 18'd270;
+			sector_end_addr = {2'b00, sector_offset[8:0]} + 11'd269;
+		end
 		disk_offset <= sector_offset;
 		disk_lba <= sector_offset[31:9];
 		disk_base <= sector_offset[8:0];
-		disk_need_second_block <= (sector_end_addr > 10'd511);
-		disk_second_block <= 0;
-		disk_wait_ack_clear <= 0;
+		disk_end_addr <= sector_end_addr;
+		disk_last_block <= sector_end_addr[10:9];
 		disk_busy <= 1;
 		disk_hps_ack_seen <= 0;
 		disk_data_ready <= 0;
@@ -490,22 +542,35 @@ always @(posedge clk_sys) begin
 		disk_rd <= 0;
 		disk_hps_ack_seen <= 1;
 	end else if (disk_busy && disk_hps_ack_seen && disk_data_ready) begin
-		if (disk_need_second_block && !disk_second_block) begin
-			disk_lba <= disk_lba + 1'd1;
-			disk_second_block <= 1;
-			disk_wait_ack_clear <= 1;
-			disk_hps_ack_seen <= 0;
-			disk_data_ready <= 0;
-		end else begin
-			disk_busy <= 0;
-			disk_wait_idle <= 1;
-			disk_ack_tgl <= ~disk_ack_tgl;
-		end
+		disk_busy <= 0;
+		disk_wait_idle <= 1;
+		disk_ack_tgl <= ~disk_ack_tgl;
 	end
 
 	if (!disk_busy) begin
 		disk_hps_ack_seen <= 0;
-		disk_wait_ack_clear <= 0;
+	end
+
+	if (disk_writeback_start) begin
+		disk_writeback_start <= 0;
+		disk_wr <= 1;
+	end
+
+	if (disk_writeback_wait_idle && !sd_ack[disk_active_drive]) begin
+		disk_writeback_wait_idle <= 0;
+		disk_writeback_busy <= 0;
+		disk_ack_tgl <= ~disk_ack_tgl;
+	end
+
+	if (!disk_busy && !disk_writeback_busy && !disk_writeback_start &&
+	    !disk_writeback_wait_idle && disk_commit_pending &&
+	    !sd_ack[disk_active_drive]) begin
+		disk_commit_pending <= 0;
+		disk_writeback_busy <= 1;
+		disk_writeback_start <= 1;
+	end else if (disk_writeback_busy && sd_ack[disk_active_drive]) begin
+		disk_wr <= 0;
+		disk_writeback_wait_idle <= 1;
 	end
 end
 
@@ -559,7 +624,7 @@ sorcerer sorcerer (
 	.KEY_CODE(key_code),
 	.UPCASE(upcase),
 
-	.RAM_SIZE(3),
+	.RAM_TOP_EXCLUSIVE(ram_top_exclusive),
 	.RAM_ADDR(ram_addr),
 	.RAM_RD(ram_rd),
 	.RAM_WR(ram_wr),
@@ -575,7 +640,7 @@ sorcerer sorcerer (
 	.DL_ADDR(ioctl_addr[15:0]),
 	.DL_DATA(ioctl_dout),
 	.DL_WE(ioctl_wr),
-	.DL_ROM(ioctl_index == IOCTL_ROM),
+	.DL_ROM(ioctl_index == IOCTL_ROM || ioctl_index == IOCTL_MONITOR),
 	.DL_QUICK(ioctl_index == IOCTL_QUICK),
 	.DL_PAC(ioctl_index == IOCTL_PAC),
 	.DL_DISKBOOT(ioctl_index == IOCTL_DISKBOOT),
@@ -585,16 +650,25 @@ sorcerer sorcerer (
 	.EXT_UART_RX_BIT(wav_uart_rx_bit),
 	.EXT_UART_HIGH_BAUD(wav_uart_high_baud),
 
-	.DISK_MOUNTED(disk_mounted),
+	.DISK_MOUNTED(core_disk_mounted),
+	.DISK_READONLY(img_readonly),
 	.DISK_REQ(disk_req),
+	.DISK_WRITE(disk_write),
+	.DISK_WRITE_COMMIT(disk_write_commit),
 	.DISK_ACK(disk_ack),
 	.DISK_WAIT(disk_wait),
 	.DISK_DRIVE(disk_drive),
+	.DISK_SIDE(disk_side),
 	.DISK_TRACK(disk_track),
 	.DISK_SECTOR(disk_sector),
+	.DISK_SECTOR_1024(disk_sector_1024),
 	.DISK_BUF_ADDR(disk_buf_addr),
 	.DISK_BUF_DOUT(disk_buf_dout),
+	.DISK_BUF_WR(disk_buf_cpu_wr),
+	.DISK_BUF_DIN(disk_buf_cpu_din),
 
+	.FDC_MICROPOLIS(fdc_micropolis),
+	.FDC_DREAMDISK(fdc_dreamdisk),
 	.UNL_PAC(status[1]),
 	.LED(ledb)
 );
@@ -1560,7 +1634,7 @@ module sorcerer_basic_tape_parser
 	output reg [15:0] END_ADDR
 );
 
-localparam RAM_TOP_EXCLUSIVE = 16'hC000;
+localparam RAM_TOP_EXCLUSIVE = 16'hE000;
 localparam BASIC_START = 16'h0200;
 
 localparam [1:0]
@@ -1718,7 +1792,7 @@ module sorcerer_tape_parser
 	output reg [15:0] RUN_ADDR
 );
 
-localparam RAM_TOP_EXCLUSIVE = 16'hC000;
+localparam RAM_TOP_EXCLUSIVE = 16'hE000;
 
 reg  [6:0] header_pos;
 reg [15:0] tape_length;

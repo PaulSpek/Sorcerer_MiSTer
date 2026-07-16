@@ -38,3 +38,8 @@ c5_pin_model_dump.txt
 *_netlist
 *.cdf
 **/.DS_Store
+sim/work/
+sim/transcript
+sim/disk_image.mem
+sim/diskboot_replay.mem
+sim/diskboot_replay_count.svh
